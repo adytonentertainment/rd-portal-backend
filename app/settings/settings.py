@@ -6,24 +6,33 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    mode: Literal["production", "development", "staging"]
+    """Application settings.
 
-    passphrase: str
+    Only the fields the royalty portal actually uses are required. Everything
+    else carries a default, because this codebase still declares credentials
+    for TuneScan-era features the portal never calls — Spotify, MLC, AudD,
+    AcoustID, ACRCloud, reCAPTCHA. Declaring those mandatory meant the app
+    refused to start on a deployment that had no reason to hold them, failing
+    with fifteen "Field required" errors before reaching any code.
+    """
+    mode: Literal["production", "development", "staging"] = "production"
+
+    passphrase: str = ""
 
     secret_key: str
     secret_algorithm: str
-    contact_email: str
+    contact_email: str = ""
     # Optional so a managed host that only injects DATABASE_URL (Render, Heroku)
     # can boot; app/database/database.py falls back to it. Setting this wins.
     sqlalchemy_database_url: str = ""
 
-    base_url_frontend: str
-    base_url_backend: str
+    base_url_frontend: str = ""
+    base_url_backend: str = ""
 
-    acrcloud_access_key: str
-    acrcloud_access_secret: str
-    acrcloud_bearer_token: str
-    acrcloud_container_id: int
+    acrcloud_access_key: str = ""
+    acrcloud_access_secret: str = ""
+    acrcloud_bearer_token: str = ""
+    acrcloud_container_id: int = 0
 
     # Stripe Mode Configuration
     stripe_mode: Literal["test", "live"] = Field(default="test")
@@ -57,8 +66,8 @@ class Settings(BaseSettings):
     stripe_price_essential_flat: Optional[str] = None
     stripe_price_essential_extra: Optional[str] = None
     stripe_price_essential_yearly: Optional[str] = None
-    essential_scans_limit: int
-    essential_catalog_limit: int
+    essential_scans_limit: int = 0
+    essential_catalog_limit: int = 0
 
     # Test Price IDs - Pro Tier
     stripe_test_price_pro_flat: Optional[str] = None
@@ -74,8 +83,8 @@ class Settings(BaseSettings):
     stripe_price_pro_flat: Optional[str] = None
     stripe_price_pro_extra: Optional[str] = None
     stripe_price_pro_yearly: Optional[str] = None
-    pro_scans_limit: int
-    pro_catalog_limit: int
+    pro_scans_limit: int = 0
+    pro_catalog_limit: int = 0
 
     # Test Price IDs - Elite Tier
     stripe_test_price_elite_flat: Optional[str] = None
@@ -91,8 +100,8 @@ class Settings(BaseSettings):
     stripe_price_elite_flat: Optional[str] = None
     stripe_price_elite_extra: Optional[str] = None
     stripe_price_elite_yearly: Optional[str] = None
-    elite_scans_limit: int
-    elite_catalog_limit: int
+    elite_scans_limit: int = 0
+    elite_catalog_limit: int = 0
 
     # Test Price IDs - Enterprise Tier
     stripe_test_price_enterprise_flat: Optional[str] = None
@@ -108,8 +117,8 @@ class Settings(BaseSettings):
     stripe_price_enterprise_flat: Optional[str] = None
     stripe_price_enterprise_extra: Optional[str] = None
     stripe_price_enterprise_yearly: Optional[str] = None
-    enterprise_scans_limit: int
-    enterprise_catalog_limit: int
+    enterprise_scans_limit: int = 0
+    enterprise_catalog_limit: int = 0
 
     @field_validator("stripe_api_secret_key", mode="before")
     @classmethod
@@ -236,17 +245,17 @@ class Settings(BaseSettings):
             return info.data.get("stripe_live_price_enterprise_yearly")
         return info.data.get("stripe_test_price_enterprise_yearly")
 
-    genius_bearer_token: str
-    genius_client_id: str
-    genius_client_secret: str
+    genius_bearer_token: str = ""
+    genius_client_id: str = ""
+    genius_client_secret: str = ""
 
-    spotify_client_id: str
-    spotify_client_secret: str
+    spotify_client_id: str = ""
+    spotify_client_secret: str = ""
 
-    email_username: str
-    email_server: str
-    email_port: int
-    email_password: str
+    email_username: str = ""
+    email_server: str = ""
+    email_port: int = 0
+    email_password: str = ""
     # The visible sender, independent of the SMTP login. Many providers let you
     # authenticate as one mailbox and send as another (an alias, or a shared
     # address like royalties@). Defaults to the login when unset.
@@ -257,21 +266,21 @@ class Settings(BaseSettings):
     email_provider: str = "smtp"
     email_api_key: Optional[str] = None
 
-    google_api_key: str
-    recaptcha_site_key: str
+    google_api_key: str = ""
+    recaptcha_site_key: str = ""
 
-    apify_api_key: str
+    apify_api_key: str = ""
 
-    songstats_api_key: str
+    songstats_api_key: str = ""
 
     # Sample Detection API Keys
-    audd_api_key: str
-    acoustid_key: str
+    audd_api_key: str = ""
+    acoustid_key: str = ""
 
     # MLC (Mechanical Licensing Collective) API
-    mlc_api_url: str
-    mlc_username: str
-    mlc_password: str
+    mlc_api_url: str = ""
+    mlc_username: str = ""
+    mlc_password: str = ""
 
     # Beta Configuration
     beta_signup_limit: Optional[int] = (

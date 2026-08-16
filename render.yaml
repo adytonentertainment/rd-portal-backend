@@ -1,0 +1,122 @@
+# Render blueprint for the VERAX backend.
+#
+# Two stateful things must survive a deploy, and neither does on Render's
+# default ephemeral filesystem:
+#
+#   1. the database  -> a managed Postgres instance (below)
+#   2. ~2 GB of statement PDFs/XLSX -> a persistent disk mounted at /var/data
+#
+# Without both, every deploy silently resets the roster and 404s every
+# download. The disk is what pins this to a single instance: Render disks
+# attach to one instance only, so numInstances stays 1 until statement files
+# move to object storage.
+#
+# Apply with: Render Dashboard -> New -> Blueprint -> point at this repo.
+
+services:
+  - type: web
+    name: verax-api
+    runtime: python
+    plan: starter # 512 MB RAM. The ingest worker parses in-process; free tier OOMs.
+    region: frankfurt
+    branch: main
+    rootDir: .
+    buildCommand: pip install -r requirements.txt
+    # Schema handled as its own step, NOT by create_all() on boot: create_all
+    # only ever adds missing TABLES, never a column added to an existing one,
+    # so it would quietly produce a schema missing every ALTER a migration made.
+    # init_db.py is used rather than a bare `alembic upgrade head` because the
+    # baseline revision is an empty stamp — upgrading a FRESH database fails on
+    # revision e16c5b8b5f94 ("relation StatsCache does not exist"). The script
+    # creates-and-stamps an empty database and upgrades an existing one.
+    preDeployCommand: python scripts/init_db.py
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /admin/statements/reconcile # 401 without auth, which is a live app
+    disk:
+      name: verax-statements
+      mountPath: /var/data
+      sizeGB: 10 # ~2 GB in use today; leaves room for two more periods
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: ENVIRONMENT
+        value: PRODUCTION
+      # Render injects DATABASE_URL from the database below. It arrives as
+      # postgres://, which SQLAlchemy 2.x rejects — app/database/database.py
+      # normalizes it to postgresql://.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: verax-db
+          property: connectionString
+      - key: STATEMENTS_STORAGE_ROOT
+        value: /var/data/statements
+      # Statement paths in the DB are relative to that root, so the same rows
+      # work locally and here.
+      - key: INGEST_WORKER_IN_PROCESS
+        value: "1"
+      - key: SKIP_CREATE_ALL
+        value: "1"
+      # --- set these in the dashboard, not here ---
+      - key: SECRET_KEY
+        sync: false # rotate on first deploy: the old one was exposed in logs
+      - key: SECRET_ALGORITHM
+        value: HS256
+      - key: ADMIN_EMAILS
+        sync: false
+      # Required to create the FIRST admin on an empty database: /register
+      # refuses any admin signup without a matching code, so without this there
+      # is no way in. An email in ADMIN_EMAILS is then auto-approved.
+      - key: ADMIN_SIGNUP_CODE
+        sync: false
+      - key: EXTRA_CORS_ORIGINS
+        sync: false # https://<your-frontend>.onrender.com
+      - key: EXTRA_ALLOWED_HOSTS
+        sync: false # <your-api>.onrender.com
+      - key: BASE_URL_FRONTEND
+        sync: false
+      - key: BASE_URL_BACKEND
+        sync: false
+      # Invite email delivery (see app/emails/providers.py)
+      - key: EMAIL_PROVIDER
+        value: resend
+      - key: EMAIL_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
+      - key: EMAIL_FROM_NAME
+        value: Verax
+
+  - type: web
+    name: verax-frontend
+    runtime: static
+    repo: https://github.com/adytonentertainment/rd-portal-frontend.git
+    branch: main
+    buildCommand: npm ci && npm run build
+    staticPublishPath: ./build
+    envVars:
+      # CRA 5 / react-scripts 5.0.1. Pinned because Render's default Node moves
+      # and a major bump breaks the build with an OpenSSL digest error.
+      - key: NODE_VERSION
+        value: "20.11.1"
+      - key: REACT_APP_BACKEND_URL
+        # A real env var beats .env.production: CRA's dotenv never overwrites an
+        # already-set variable, so this wins over the api-staging.verax.app in
+        # the repo without editing the file.
+        sync: false # https://<your-api>.onrender.com
+      # CRA treats warnings as errors in CI, which fails the build on lint
+      # warnings that are fine locally.
+      - key: CI
+        value: "false"
+    routes:
+      # Client-side routing: /earnings, /statements, /invite/:token are React
+      # routes with no file behind them, so everything falls through to
+      # index.html or a refresh returns 404.
+      - type: rewrite
+        source: /*
+        destination: /index.html
+
+databases:
+  - name: verax-db
+    plan: basic-256mb # 6.7M statement_line rows; do not use free (expires in 30 days)
+    region: frankfurt
+    postgresMajorVersion: "16"

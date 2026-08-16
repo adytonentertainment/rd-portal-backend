@@ -1,0 +1,332 @@
+<table
+    border="0"
+    cellpadding="0"
+    cellspacing="0"
+    width="600"
+    id="templateContainer"
+    style="
+        border: 2px solid #2c2c2c;
+        background-color: #f5f5f0;
+        border-radius: 8px;
+        overflow: hidden;
+    "
+>
+    <tbody>
+        <tr>
+            <td align="center" valign="top" style="border-collapse: collapse">
+                <!-- // Begin Template Header \\ -->
+                <table
+                    border="0"
+                    cellpadding="0"
+                    cellspacing="0"
+                    width="600"
+                    id="templateHeader"
+                    style="
+                        background-color: #fafaf8;
+                        border-bottom: 2px solid #2c2c2c;
+                    "
+                >
+                    <tbody>
+                        <tr>
+                            <td
+                                class="headerContent"
+                                style="
+                                    border-collapse: collapse;
+                                    padding: 40px 20px 30px;
+                                    text-align: center;
+                                    vertical-align: middle;
+                                "
+                            >
+                                <!-- Logo -->
+                                <img
+                                    src="{{ logo_src }}"
+                                    alt="Verax"
+                                    style="
+                                        max-width: 180px;
+                                        height: auto;
+                                        border: 0;
+                                        outline: none;
+                                        text-decoration: none;
+                                        display: inline-block;
+                                    "
+                                    id="headerImage"
+                                />
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+                <!-- // End Template Header \\ -->
+            </td>
+        </tr>
+        <tr>
+            <td align="center" valign="top" style="border-collapse: collapse">
+                <!-- // Begin Template Body \\ -->
+                <table
+                    border="0"
+                    cellpadding="0"
+                    cellspacing="0"
+                    width="600"
+                    id="templateBody"
+                >
+                    <tbody>
+                        <tr>
+                            <td valign="top" style="border-collapse: collapse">
+                                <!-- // Begin Module: Standard Content \\ -->
+                                <table
+                                    border="0"
+                                    cellpadding="30"
+                                    cellspacing="0"
+                                    width="100%"
+                                >
+                                    <tbody>
+                                        <tr>
+                                            <td
+                                                valign="top"
+                                                class="bodyContent"
+                                                style="
+                                                    border-collapse: collapse;
+                                                    background-color: #fafaf8;
+                                                "
+                                            >
+                                                <div
+                                                    style="
+                                                        color: #1f2937;
+                                                        font-family:
+                                                            &quot;Inter&quot;,
+                                                            -apple-system,
+                                                            BlinkMacSystemFont,
+                                                            &quot;Segoe UI&quot;,
+                                                            sans-serif;
+                                                        font-size: 16px;
+                                                        line-height: 1.6;
+                                                        text-align: left;
+                                                    "
+                                                >
+                                                    <h1
+                                                        style="
+                                                            color: #2c2c2c;
+                                                            font-size: 28px;
+                                                            font-weight: 600;
+                                                            line-height: 1.2;
+                                                            margin: 0 0 20px 0;
+                                                            text-align: center;
+                                                            letter-spacing: -0.02em;
+                                                        "
+                                                    >
+                                                        {{ title }}
+                                                    </h1>
+                                                    <p
+                                                        style="
+                                                            color: #1f2937;
+                                                            margin: 0 0 20px 0;
+                                                        "
+                                                    >
+                                                        {{ message|safe }}
+                                                    </p>
+                                                    <p
+                                                        style="
+                                                            color: #71717a;
+                                                            margin: 20px 0 0 0;
+                                                        "
+                                                    >
+                                                        Kind regards,<br />
+                                                        <strong
+                                                            style="
+                                                                color: #2c2c2c;
+                                                            "
+                                                            >your Verax
+                                                            Team</strong
+                                                        >
+                                                    </p>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                        {% if button %}
+                                        <tr>
+                                            <td
+                                                align="center"
+                                                valign="top"
+                                                style="
+                                                    padding: 0 30px 30px 30px;
+                                                    border-collapse: collapse;
+                                                    background-color: #fafaf8;
+                                                "
+                                            >
+                                                <table
+                                                    border="0"
+                                                    cellpadding="0"
+                                                    cellspacing="0"
+                                                    style="
+                                                        border-collapse: separate;
+                                                    "
+                                                >
+                                                    <tbody>
+                                                        <tr>
+                                                            <td
+                                                                align="center"
+                                                                style="
+                                                                    border-collapse: collapse;
+                                                                "
+                                                            >
+                                                                <a
+                                                                    href="{{ button_url }}"
+                                                                    target="_blank"
+                                                                    style="
+                                                                        display: inline-block;
+                                                                        padding: 14px
+                                                                            32px;
+                                                                        background: #2c2c2c;
+                                                                        color: #ffffff;
+                                                                        font-family:
+                                                                            &quot;Inter&quot;,
+                                                                            -apple-system,
+                                                                            sans-serif;
+                                                                        font-size: 15px;
+                                                                        font-weight: 600;
+                                                                        text-decoration: none;
+                                                                        border-radius: 4px;
+                                                                        letter-spacing: 0.0125em;
+                                                                        text-transform: uppercase;
+                                                                        box-shadow: 0
+                                                                            2px
+                                                                            8px
+                                                                            rgba(
+                                                                                0,
+                                                                                0,
+                                                                                0,
+                                                                                0.08
+                                                                            );
+                                                                    "
+                                                                >
+                                                                    {{ button }}
+                                                                </a>
+                                                            </td>
+                                                        </tr>
+                                                    </tbody>
+                                                </table>
+                                            </td>
+                                        </tr>
+                                        {% endif %}
+                                    </tbody>
+                                </table>
+                                <!-- // End Module: Standard Content \\ -->
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+                <!-- // End Template Body \\ -->
+            </td>
+        </tr>
+        <tr>
+            <td align="center" valign="top" style="border-collapse: collapse">
+                <!-- // Begin Template Footer \\ -->
+                <table
+                    border="0"
+                    cellpadding="20"
+                    cellspacing="0"
+                    width="600"
+                    id="templateFooter"
+                    style="
+                        background-color: #fafaf8;
+                        border-top: 2px solid #2c2c2c;
+                    "
+                >
+                    <tbody>
+                        <tr>
+                            <td
+                                valign="top"
+                                class="footerContent"
+                                style="border-collapse: collapse"
+                            >
+                                <!-- Social Links -->
+                                <table
+                                    border="0"
+                                    cellpadding="10"
+                                    cellspacing="0"
+                                    width="100%"
+                                >
+                                    <tbody>
+                                        <tr>
+                                            <td
+                                                align="center"
+                                                style="
+                                                    border-collapse: collapse;
+                                                "
+                                            >
+                                                <div
+                                                    style="
+                                                        color: #71717a;
+                                                        font-family:
+                                                            &quot;Inter&quot;,
+                                                            sans-serif;
+                                                        font-size: 13px;
+                                                        line-height: 1.5;
+                                                        text-align: center;
+                                                    "
+                                                >
+                                                    <a
+                                                        href="https://www.instagram.com/verax.app/"
+                                                        target="_blank"
+                                                        style="
+                                                            color: #5bc0f8;
+                                                            font-weight: 500;
+                                                            text-decoration: none;
+                                                            margin: 0 8px;
+                                                        "
+                                                        >Instagram</a
+                                                    >
+                                                    <span style="color: #d4d4d0"
+                                                        >|</span
+                                                    >
+                                                    <a
+                                                        href="{{ base_url }}/contact"
+                                                        target="_blank"
+                                                        style="
+                                                            color: #5bc0f8;
+                                                            font-weight: 500;
+                                                            text-decoration: none;
+                                                            margin: 0 8px;
+                                                        "
+                                                        >Contact</a
+                                                    >
+                                                </div>
+                                            </td>
+                                        </tr>
+                                        <tr>
+                                            <td
+                                                align="center"
+                                                style="
+                                                    border-collapse: collapse;
+                                                    padding-top: 15px;
+                                                "
+                                            >
+                                                <div
+                                                    style="
+                                                        color: #71717a;
+                                                        font-family:
+                                                            &quot;Inter&quot;,
+                                                            sans-serif;
+                                                        font-size: 12px;
+                                                        line-height: 1.5;
+                                                        text-align: center;
+                                                    "
+                                                >
+                                                    <em
+                                                        >Copyright © 2025 Verax
+                                                        UG, All rights
+                                                        reserved.</em
+                                                    >
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+                <!-- // End Template Footer \\ -->
+            </td>
+        </tr>
+    </tbody>
+</table>

@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PRO Registration Audit</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: #0a0a0a;
+            color: #ffffff;
+            min-height: 100vh;
+            padding: 40px 20px;
+        }
+
+        .container { max-width: 1100px; margin: 0 auto; }
+
+        h1 {
+            font-size: 28px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+
+        .subtitle { color: #9ca3af; margin-bottom: 32px; font-size: 14px; }
+
+        .card {
+            background: #1a1a1a;
+            border: 2px solid #ffffff;
+            border-radius: 12px;
+            box-shadow: 4px 4px 0px #ffffff;
+            padding: 24px;
+            margin-bottom: 24px;
+        }
+
+        .card-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 16px;
+            color: #e5e7eb;
+        }
+
+        .form-row {
+            display: flex;
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+
+        .form-group { flex: 1; }
+        .form-group.full { flex: none; width: 100%; }
+
+        .form-group label {
+            display: block;
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 6px;
+            color: #9ca3af;
+        }
+
+        .form-group input, .form-group textarea, .form-group select {
+            width: 100%;
+            padding: 12px 14px;
+            font-size: 15px;
+            border: 2px solid #333;
+            border-radius: 8px;
+            background: #0a0a0a;
+            color: #fff;
+            font-family: inherit;
+        }
+
+        .form-group input:focus, .form-group textarea:focus, .form-group select:focus {
+            outline: none;
+            border-color: #fff;
+        }
+
+        .form-group select {
+            cursor: pointer;
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%23999'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M19 9l-7 7-7-7'%3E%3C/path%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 12px center;
+            background-size: 16px;
+            padding-right: 40px;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px 24px;
+            font-size: 14px;
+            font-weight: 600;
+            border: 2px solid #000;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .btn-primary {
+            background: #ffffff;
+            color: #000;
+            box-shadow: 3px 3px 0px #ffffff;
+        }
+
+        .btn-primary:hover {
+            transform: translate(-2px, -2px);
+            box-shadow: 5px 5px 0px #ffffff;
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-secondary {
+            background: transparent;
+            color: #fff;
+            border-color: #444;
+        }
+
+        /* Summary Stats */
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .stat-card {
+            background: #111;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 16px;
+            text-align: center;
+        }
+
+        .stat-number {
+            font-size: 32px;
+            font-weight: 700;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: #9ca3af;
+            margin-top: 4px;
+        }
+
+        .stat-card.found .stat-number { color: #22c55e; }
+        .stat-card.partial .stat-number { color: #eab308; }
+        .stat-card.missing .stat-number { color: #ef4444; }
+
+        /* Results Table */
+        .results-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .results-table th {
+            text-align: left;
+            padding: 12px 16px;
+            background: #111;
+            font-size: 12px;
+            font-weight: 600;
+            color: #9ca3af;
+            text-transform: uppercase;
+            border-bottom: 1px solid #333;
+        }
+
+        .results-table td {
+            padding: 16px;
+            border-bottom: 1px solid #222;
+            vertical-align: top;
+        }
+
+        .results-table tr:hover td {
+            background: rgba(255,255,255,0.02);
+        }
+
+        .song-title {
+            font-weight: 600;
+            font-size: 15px;
+        }
+
+        /* Status Badges */
+        .status-badge {
+            display: inline-block;
+            font-size: 11px;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+
+        .status-registered { background: rgba(34,197,94,0.2); color: #22c55e; }
+        .status-collection-issue { background: rgba(234,179,8,0.2); color: #eab308; }
+        .status-not-registered { background: rgba(239,68,68,0.2); color: #ef4444; }
+        .status-error { background: rgba(156,163,175,0.2); color: #9ca3af; }
+
+        /* PRO Results */
+        .pro-results {
+            display: flex;
+            gap: 8px;
+            flex-direction: column;
+        }
+
+        .pro-result {
+            font-size: 12px;
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 4px;
+            padding: 8px 10px;
+            max-height: 80px;
+            overflow: hidden;
+            color: #9ca3af;
+        }
+
+        .pro-result.found {
+            border-color: #22c55e;
+            color: #e5e7eb;
+        }
+
+        .pro-result-count {
+            font-weight: 600;
+            color: #fff;
+        }
+
+        /* Loading */
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.8);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+        }
+
+        .loading-content {
+            text-align: center;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid #333;
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 16px;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .loading-text {
+            font-size: 14px;
+            color: #9ca3af;
+        }
+
+        .loading-progress {
+            margin-top: 8px;
+            font-size: 13px;
+            color: #666;
+        }
+
+        /* Footer */
+        .footer {
+            margin-top: 48px;
+            text-align: center;
+            color: #666;
+            font-size: 12px;
+        }
+
+        .footer a { color: #9ca3af; text-decoration: none; }
+
+        /* Note */
+        .note {
+            background: rgba(234,179,8,0.1);
+            border: 1px solid rgba(234,179,8,0.3);
+            border-radius: 8px;
+            padding: 12px 16px;
+            font-size: 13px;
+            color: #eab308;
+            margin-bottom: 24px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>PRO Registration Audit</h1>
+        <p class="subtitle">Check song registrations via ASCAP Repertory (includes Songview data)</p>
+
+        <div class="note">
+            <strong>How it works:</strong> Searches ASCAP Repertory (includes Songview/BMI data), then checks if your name and IPI appear in the results.
+            If registered but your info is missing = Collection Issue. Add performer after song title with | (e.g., "Shape of You | Ed Sheeran") to narrow results.
+        </div>
+
+        <!-- Input Form -->
+        <div class="card">
+            <div class="card-title">Audit Configuration</div>
+
+            <!-- Writer Info -->
+            <div style="margin-bottom: 8px; font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600;">Writer</div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Writer Name</label>
+                    <input type="text" id="writerName" placeholder="Ed Sheeran">
+                </div>
+                <div class="form-group">
+                    <label>Writer IPI (Optional)</label>
+                    <input type="text" id="writerIpi" placeholder="00493974437">
+                </div>
+            </div>
+
+            <!-- Publisher Info -->
+            <div style="margin-bottom: 8px; margin-top: 16px; font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600;">Publisher</div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Publisher Name</label>
+                    <input type="text" id="publisherName" placeholder="Sony/ATV Music Publishing">
+                </div>
+                <div class="form-group">
+                    <label>Publisher IPI (Optional)</label>
+                    <input type="text" id="publisherIpi" placeholder="00521896803">
+                </div>
+            </div>
+            <div class="form-group full">
+                <label>Songs to Audit (one per line, optional performer after |)</label>
+                <textarea id="songsList" rows="6" placeholder="Shape of You | Ed Sheeran
+Perfect
+Thinking Out Loud | Ed Sheeran"></textarea>
+            </div>
+            <div style="margin-top: 16px;">
+                <button class="btn btn-primary" id="auditBtn">
+                    Start Audit
+                </button>
+            </div>
+        </div>
+
+        <!-- Results Section -->
+        <div id="resultsSection" style="display: none;">
+            <!-- Summary -->
+            <div class="summary-grid" id="summaryGrid"></div>
+
+            <!-- Results Table -->
+            <div class="card">
+                <div class="card-title">Audit Results (via ASCAP/Songview)</div>
+                <table class="results-table">
+                    <thead>
+                        <tr>
+                            <th style="width: 30%;">Song Title</th>
+                            <th style="width: 15%;">Status</th>
+                            <th style="width: 55%;">Registration Details</th>
+                        </tr>
+                    </thead>
+                    <tbody id="resultsBody"></tbody>
+                </table>
+            </div>
+
+            <!-- Export -->
+            <div style="display: flex; gap: 12px; justify-content: flex-end;">
+                <button class="btn btn-secondary" id="exportBtn">Export Results</button>
+            </div>
+        </div>
+
+        <div class="footer">
+            <p>PRO Registration Audit Tool</p>
+        </div>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div class="loading-overlay" id="loadingOverlay" style="display: none;">
+        <div class="loading-content">
+            <div class="spinner"></div>
+            <div class="loading-text" id="loadingText">Starting audit...</div>
+            <div class="loading-progress" id="loadingProgress"></div>
+        </div>
+    </div>
+
+    <script>
+        const auditBtn = document.getElementById('auditBtn');
+        const resultsSection = document.getElementById('resultsSection');
+        const loadingOverlay = document.getElementById('loadingOverlay');
+        const loadingText = document.getElementById('loadingText');
+        const loadingProgress = document.getElementById('loadingProgress');
+
+        let auditResults = null;
+
+        auditBtn.addEventListener('click', async () => {
+            const writerName = document.getElementById('writerName').value.trim();
+            const writerIpi = document.getElementById('writerIpi').value.trim();
+            const publisherName = document.getElementById('publisherName').value.trim();
+            const publisherIpi = document.getElementById('publisherIpi').value.trim();
+            // Parse songs with optional performer (format: "Song Title | Performer")
+            const songLines = document.getElementById('songsList').value
+                .split('\n')
+                .map(s => s.trim())
+                .filter(Boolean);
+
+            const songs = songLines.map(line => {
+                if (line.includes('|')) {
+                    const [title, performer] = line.split('|').map(s => s.trim());
+                    return { title, performer: performer || null };
+                }
+                return { title: line, performer: null };
+            });
+
+            if (!writerName && !publisherName) {
+                alert('Please enter at least a writer or publisher name');
+                return;
+            }
+
+            if (songs.length === 0) {
+                alert('Please enter at least one song');
+                return;
+            }
+
+            // Show loading
+            loadingOverlay.style.display = 'flex';
+            loadingText.textContent = 'Initializing browser...';
+            loadingProgress.textContent = `0 / ${songs.length} songs`;
+            auditBtn.disabled = true;
+
+            try {
+                const response = await fetch('/api/audit/stream', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        writer_name: writerName || null,
+                        writer_ipi: writerIpi || null,
+                        publisher_name: publisherName || null,
+                        publisher_ipi: publisherIpi || null,
+                        songs: songs
+                    })
+                });
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n\n');
+                    buffer = lines.pop(); // Keep incomplete chunk
+
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            const data = JSON.parse(line.slice(6));
+
+                            if (data.type === 'start') {
+                                loadingText.textContent = 'Starting audit...';
+                                loadingProgress.textContent = `0 / ${data.total} songs`;
+                            } else if (data.type === 'progress') {
+                                loadingText.textContent = `Searching: ${data.song}`;
+                                loadingProgress.textContent = `${data.current} / ${data.total} songs`;
+                            } else if (data.type === 'song_complete') {
+                                const statusEmoji = data.song.status === 'registered' ? '✓' :
+                                    data.song.status === 'collection_issue' ? '⚠' : '✗';
+                                loadingText.textContent = `${statusEmoji} ${data.song.title}`;
+                                loadingProgress.textContent = `${data.current} / ${data.total} songs`;
+                            } else if (data.type === 'complete') {
+                                auditResults = data;
+                                renderResults(data);
+                                resultsSection.style.display = 'block';
+                            }
+                        }
+                    }
+                }
+
+            } catch (error) {
+                console.error('Audit error:', error);
+                alert('Error during audit: ' + error.message);
+            } finally {
+                loadingOverlay.style.display = 'none';
+                auditBtn.disabled = false;
+            }
+        });
+
+        function renderResults(data) {
+            // Summary stats from the API
+            const summary = data.summary;
+
+            document.getElementById('summaryGrid').innerHTML = `
+                <div class="stat-card">
+                    <div class="stat-number">${summary.total}</div>
+                    <div class="stat-label">Total Songs</div>
+                </div>
+                <div class="stat-card found">
+                    <div class="stat-number">${summary.registered}</div>
+                    <div class="stat-label">Registered</div>
+                </div>
+                <div class="stat-card partial">
+                    <div class="stat-number">${summary.collection_issue}</div>
+                    <div class="stat-label">Collection Issues</div>
+                </div>
+                <div class="stat-card missing">
+                    <div class="stat-number">${summary.not_registered}</div>
+                    <div class="stat-label">Not Found</div>
+                </div>
+            `;
+
+            // Results table - show analysis results
+            document.getElementById('resultsBody').innerHTML = data.songs.map(song => {
+                const analysis = song.analysis;
+                const statusClass = getStatusClass(analysis.status);
+                const statusText = getStatusText(analysis.status);
+                const titleWithPerformer = song.performer
+                    ? `${escapeHtml(song.title)}<span style="color: #9ca3af; font-size: 11px; display: block;">${escapeHtml(song.performer)}</span>`
+                    : escapeHtml(song.title);
+
+                return `
+                    <tr>
+                        <td class="song-title">${titleWithPerformer}</td>
+                        <td><span class="status-badge ${statusClass}">${statusText}</span></td>
+                        <td>${renderAnalysisResult(song)}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        function getStatusClass(status) {
+            switch(status) {
+                case 'registered': return 'status-registered';
+                case 'collection_issue': return 'status-collection-issue';
+                case 'not_registered': return 'status-not-registered';
+                default: return 'status-error';
+            }
+        }
+
+        function getStatusText(status) {
+            switch(status) {
+                case 'registered': return 'Registered';
+                case 'collection_issue': return 'Collection Issue';
+                case 'not_registered': return 'Not Found';
+                default: return 'Error';
+            }
+        }
+
+        function renderAnalysisResult(song) {
+            const analysis = song.analysis;
+            const ascap = song.ascap;
+
+            // Build indicators for writer
+            let writerIndicators = [];
+            if (analysis.writer_name_found !== undefined && analysis.writer_name_found !== null) {
+                writerIndicators.push(`<span style="color: ${analysis.writer_name_found ? '#22c55e' : '#ef4444'}">Name: ${analysis.writer_name_found ? '✓' : '✗'}</span>`);
+            }
+            if (analysis.writer_ipi_found !== undefined && analysis.writer_ipi_found !== null) {
+                writerIndicators.push(`<span style="color: ${analysis.writer_ipi_found ? '#22c55e' : '#ef4444'}">IPI: ${analysis.writer_ipi_found ? '✓' : '✗'}</span>`);
+            }
+
+            // Build indicators for publisher
+            let publisherIndicators = [];
+            if (analysis.publisher_name_found !== undefined && analysis.publisher_name_found !== null) {
+                publisherIndicators.push(`<span style="color: ${analysis.publisher_name_found ? '#22c55e' : '#ef4444'}">Name: ${analysis.publisher_name_found ? '✓' : '✗'}</span>`);
+            }
+            if (analysis.publisher_ipi_found !== undefined && analysis.publisher_ipi_found !== null) {
+                publisherIndicators.push(`<span style="color: ${analysis.publisher_ipi_found ? '#22c55e' : '#ef4444'}">IPI: ${analysis.publisher_ipi_found ? '✓' : '✗'}</span>`);
+            }
+
+            let html = `<div class="pro-results">`;
+
+            // Analysis message with separate writer/publisher indicators
+            html += `<div class="pro-result ${analysis.status === 'registered' ? 'found' : ''}">`;
+
+            if (writerIndicators.length > 0) {
+                html += `<div style="margin-bottom: 4px;"><span style="color: #666; font-size: 10px;">WRITER:</span> ${writerIndicators.join(' &nbsp;|&nbsp; ')}</div>`;
+            }
+            if (publisherIndicators.length > 0) {
+                html += `<div style="margin-bottom: 4px;"><span style="color: #666; font-size: 10px;">PUBLISHER:</span> ${publisherIndicators.join(' &nbsp;|&nbsp; ')}</div>`;
+            }
+
+            html += `<div style="color: #9ca3af; font-size: 11px;">${escapeHtml(analysis.message)}</div>
+            </div>`;
+
+            // Show raw result preview if available
+            if (ascap && ascap.results && ascap.results.length > 0) {
+                const preview = ascap.results[0]?.raw || '';
+                html += `<div class="pro-result" style="margin-top: 4px; font-size: 11px; max-height: 60px;">
+                    <span style="color: #666;">${ascap.count} result(s) from ASCAP:</span><br>
+                    ${escapeHtml(preview.substring(0, 120))}...
+                </div>`;
+            }
+
+            html += `</div>`;
+            return html;
+        }
+
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Export
+        document.getElementById('exportBtn').addEventListener('click', () => {
+            if (!auditResults) return;
+
+            const user = auditResults.user;
+            const csv = `Song Title,Status,Name Found,IPI Found,Message,ASCAP Count\n` +
+                auditResults.songs.map(s => {
+                    const a = s.analysis;
+                    return `"${s.title}","${a.status}","${a.name_found}","${a.ipi_found ?? 'N/A'}","${a.message}","${s.ascap?.count || 0}"`;
+                }).join('\n');
+
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `pro_audit_${user.name.replace(/\s+/g, '_')}.csv`;
+            a.click();
+        });
+    </script>
+</body>
+</html>

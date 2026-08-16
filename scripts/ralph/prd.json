@@ -1,0 +1,179 @@
+{
+  "project": "Verax Backend — Statement Data Integration Phase 1",
+  "branchName": "ralph/statement-data-integration",
+  "description": "Phase 1 of docs/PRD-statement-data-integration.md: ingestion + sorting + parsing + integrity validation for publisher royalty statement drops (loose PDF+XLSX files per writer). No distribution gate, no portal, no email — that's later phases.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Statement domain models + Alembic migration",
+      "description": "As a developer, I need the Phase 1 database schema so all later stories have tables to work with.",
+      "acceptanceCriteria": [
+        "New module app/models/statements.py (imported from app/models/models.py or registered with the same Base) with tables per PRD §5: publisher, writer, writer_alias, beneficiary_account, statement_upload (id, uploaded_by, uploaded_at, file_count, status, stats JSON), statement_batch, statement, statement_line, validation_run, validation_finding",
+        "Columns follow PRD §5 including: beneficiary_account.account_code unique; statement unique on (account_id, period_code, version); statement money columns Numeric(14,6); statement.zero_pay_reason nullable enum; validation_finding has rule_id, severity, scope, scope_ref, message, details JSON, status, waived_by, waived_reason, waived_at",
+        "statement_batch has upload_id FK, period_code, catalog (MECH|YT|PERF), cadence, status, stats JSON; label derivable",
+        "Alembic migration generated and applies cleanly to a scratch SQLite db in a test (use Base.metadata.create_all for the test; migration file exists for Postgres)",
+        "pytest + openpyxl added to requirements.txt and installed in venv",
+        "tests/conftest.py provides a session fixture on temp SQLite",
+        "venv/bin/python -c 'import app.main' passes; venv/bin/python -m pytest tests/ -x -q passes"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Look at app/models/models.py for conventions (Base import, Column style). Money = Numeric(14,6). Seed nothing. Keep account_ledger / distribution tables OUT (later phases add them)."
+    },
+    {
+      "id": "US-002",
+      "title": "Filename parser for statement files",
+      "description": "As the system, I must derive (period_code, account_code, display_name, royalty_type, file kind) from a statement filename, because sorting the admin's unsorted dump depends entirely on it.",
+      "acceptanceCriteria": [
+        "app/services/statement_ingest/filename_parser.py with parse_statement_filename(filename) -> dataclass or None",
+        "Handles PDF form 'Ben_PUB25H2_CSJ002 - Javier Solis (Mechanical Royalties).pdf' and XLSX form 'Ben_PUB25H2_CSJ002_Javier Solis (Mechanical Royalties).xlsx'",
+        "Account code regex is [A-Za-z0-9]+(?:-New)? — must correctly key 'Ben_PUB26H1_C00739-New - Swifty Blue NEW (YouTube Publishing).pdf' as C00739-New (greedy/hyphen-naive regexes fail this)",
+        "Royalty type from trailing parens: 'Mechanical Royalties' -> MECH, 'YouTube Publishing' -> YT, 'Performance Royalties' -> PERF; files with no parens (e.g. 'Ben_PUB25H2_C00001b - AkwidAfterVydia.pdf') return royalty_type None for catalog inference from batch context",
+        "Period regex PUB\\d{2}[HQ]\\d -> period_code; also exposes cadence (H=semiannual, Q=quarterly)",
+        "Classifies house account codes (CS\\d+, CPJ\\d+) with is_house flag per PRD §2.3",
+        "Unit tests cover: all 14 real fixture filenames in tests/fixtures/statements/, sub-account codes (C00139a), -New codes, house codes, the PDF-vs-XLSX name-drift pair (JN0080 'Kill Bill- The Rapper' pdf vs 'Kill Bill The Rapper' xlsx must both key to JN0080), and garbage filenames returning None",
+        "All quality checks pass"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "Pure function, no DB. PRD §2.3 has the naming ground truth."
+    },
+    {
+      "id": "US-003",
+      "title": "Upload endpoint: dump loose files in one place",
+      "description": "As an admin, I dump all my statement files (hundreds, unsorted) into one upload so the system can sort them for me.",
+      "acceptanceCriteria": [
+        "POST /admin/statements/uploads accepts multipart with many files (UploadFile list); creates statement_upload row, stores originals under storage/statements/incoming/{upload_id}/ preserving filenames",
+        "Endpoint is admin-gated: reuse existing auth dependency (see app/routers/auth.py get_current_user) plus an is_admin check (User.email in ADMIN_EMAILS env var, comma-separated, default empty -> 403). Keep it simple; a role column is out of scope",
+        "Returns 202 with {upload_id, file_count}; rejects empty uploads with 400; non-pdf/xlsx files are stored but flagged in stats.skipped",
+        "GET /admin/statements/uploads/{id} returns upload status + stats",
+        "Router registered in app/main.py under existing patterns",
+        "Tests use FastAPI TestClient with auth dependency overridden, uploading 3 real fixture files to a tmp storage dir (settings/env override for storage root)",
+        "All quality checks pass"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "Storage root must be configurable (env/setting) so tests don't write into the repo. Look at how existing routers handle file storage (app/routers/publishing_admin.py uses storage/publishing-agreements/)."
+    },
+    {
+      "id": "US-004",
+      "title": "Sort stage: derive batches, pair PDF+XLSX per writer account",
+      "description": "As the system, after an upload I sort the loose files: auto-create batches per (period, catalog), pair each detail XLSX with its one summarizing PDF by (period, account_code), and report anything unsortable.",
+      "acceptanceCriteria": [
+        "app/services/statement_ingest/sorter.py: sort_upload(upload_id, session) parses every stored filename, groups by (period_code, catalog), auto-creates statement_batch rows (never duplicates an existing batch for same period+catalog+publisher), creates statement rows with pdf_path/xlsx_path linked to batch and beneficiary_account",
+        "Auto-creates beneficiary_account (and a placeholder writer with canonical_name from display name, is_house_account from code pattern) for unseen account codes",
+        "Pairing keys on (period_code, account_code) ONLY — the JN0080 fixture pair with drifted display names must pair correctly",
+        "Unpaired files (XLSX missing its PDF or vice versa), unparseable filenames, and duplicates of already-ingested (account, period, catalog) statements are recorded in upload stats and as data for later validation — not exceptions, sorting continues",
+        "Files moved (or copied) from incoming/ to storage/statements/{period_code}/{catalog}/",
+        "Re-running sort_upload on the same upload is idempotent (no duplicate batches/statements)",
+        "Integration test: upload all 14 fixture files in one go -> expect 5 batches (PUB25H2/MECH, PUB26H1/MECH, PUB26H1/YT, PUB25Q4/YT, PUB26Q2/YT), 7 statements, all paired, 0 unsortable",
+        "All quality checks pass"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": "PRD §6 stages 1-2. Keep it synchronous for now (worker orchestration is US-007). The 14 fixtures span 5 period+catalog combos — perfect sort test."
+    },
+    {
+      "id": "US-005",
+      "title": "XLSX detail parser",
+      "description": "As the system, I parse each detail spreadsheet into statement_line rows and compute the detail sum, handling every real-world quirk the PRD documents.",
+      "acceptanceCriteria": [
+        "app/services/statement_ingest/xlsx_parser.py: parse_statement_xlsx(path) -> (lines, detail_sum, embedded_total, line_count) using openpyxl read_only mode",
+        "Header row located by scanning for the row whose first cell is 'Period' (fixtures JN0080 and C00139 have a blank first row and MUST parse)",
+        "Maps both schema variants per PRD §2.4 (Mechanical: SongCode/WrtierSplit%; YouTube: AssetID/CustomID Client/ContPer) into the statement_line superset; the literal header typo 'WrtierSplit%' must be mapped",
+        "Grand-total row (all cells None except Earnings) is excluded from lines and captured as embedded_total",
+        "SongTitle/SongCode coerced to str (real files have numeric titles like 118); Earnings kept as Decimal",
+        "persist_lines(statement_id, lines, session) bulk-inserts efficiently (bulk_insert_mappings or executemany — NOT row-by-row ORM adds; fixture C00139a has 10,035 rows)",
+        "Test against ALL 7 fixture XLSX files asserting detail_sum, embedded_total (±0.0001) and line_count exactly match tests/fixtures/statements/expected_values.json",
+        "All quality checks pass"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": "expected_values.json keys are {period}_{account_code}; xlsx_detail_sum/xlsx_embedded_total/xlsx_line_count are the ground truth, verified against 2,612 real files."
+    },
+    {
+      "id": "US-006",
+      "title": "PDF account summary parser",
+      "description": "As the system, I extract the official figures (calculated, recouped, reserves, carryforward, payable, settlement) from each summarizing PDF.",
+      "acceptanceCriteria": [
+        "app/services/statement_ingest/pdf_parser.py: parse_statement_pdf(path) -> dict of account summary fields, using pdfplumber on pages 1-3 only",
+        "Handles BOTH layouts per PRD §2.5: old 4-line ('Royalties calculated / Amount recouped / Total amount before tax / Total payable amount') and new 9-line (adds reserves, carried forward, payable for this period, payable from previous period, settlement paid)",
+        "Patterns tolerate extracted-text artifacts: spaces inside words ('Payable am ount', 'pe riod') — use \\s* between letters where PRD §2.5 warns; amounts parse comma separators and minus signs to Decimal",
+        "Also extracts the page-1 cheque line amount when present ('cheque of USD X')",
+        "Returns None for fields absent in the old layout (e.g. settlement) — never fabricates 0.0 vs missing distinction",
+        "Test against ALL 7 fixture PDFs asserting every field matches expected_values.json exactly (calculated, recouped, reserve_taken, reserve_released, carried_forward, before_tax, payable_this, payable_prev, settlement, payable; null in JSON == None)",
+        "All quality checks pass"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": "The 7 fixtures deliberately cover: simple paid (CSJ002), full recoupment payable=0 (JN0249), carryforward into payable (C00650: calculated 6,663.27 but payable 45,193.21), below-threshold zero-pay (C00739-New), settlement cases (JN0080, C00139a)."
+    },
+    {
+      "id": "US-007",
+      "title": "Pipeline orchestration: DB-polled background worker",
+      "description": "As an admin, after dumping files I watch progress (sorted/parsed/failed/remaining) without the request hanging — parsing 1,500 files cannot run inside a web request.",
+      "acceptanceCriteria": [
+        "ingest_job table (or status fields on statement_upload) driving stages per PRD §6: uploaded -> sorting -> parsing -> validating -> done/failed, with per-stage counters in stats JSON",
+        "app/services/statement_ingest/worker.py: run_pending_jobs(session) processes one stage step at a time; a standalone runner script scripts/run_ingest_worker.py loops with sleep, and POST /admin/statements/uploads kicks the job (worker picks it up); for dev convenience an env flag INGEST_INLINE=1 runs the pipeline synchronously after upload",
+        "Each statement parse is independently fault-isolated: one corrupt file marks that statement parse_status=failed with the error recorded, never kills the batch",
+        "Pipeline is idempotent and resumable: re-running after a crash skips already-parsed statements (keyed by parse_status)",
+        "GET /admin/statements/uploads/{id} now reports stage + counters live",
+        "Integration test: full pipeline on the 14 fixtures via INGEST_INLINE, then assert all 7 statements parsed with detail_sum populated; second run changes nothing (idempotency assert)",
+        "All quality checks pass"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": "PRD §12.1 chose DB-polled worker over Celery deliberately — no Redis, no new infra. Keep the worker dumb: claim job by status update, process, write back."
+    },
+    {
+      "id": "US-008",
+      "title": "Validation engine + V-FILE rules",
+      "description": "As an admin, I see file-integrity problems (missing pair, unparseable, duplicates) as structured findings, not log lines.",
+      "acceptanceCriteria": [
+        "app/services/validation/engine.py: declarative rule registry per PRD §7.1 — each rule {id, level, default_severity, scope, check(ctx)}; run_validation(batch_id, session) creates validation_run + validation_finding rows",
+        "Findings carry stable identity (rule_id + scope_ref) so re-running validation preserves waived/resolved status of unchanged findings and closes findings that no longer apply",
+        "Rules V-FILE-1..6 implemented per PRD §7.2 table, including the house-account exceptions for V-FILE-1 (accounts flagged pdf_only/xlsx_only e.g. CPJ001, CS0001)",
+        "POST /admin/statements/batches/{id}/revalidate endpoint triggers a run; findings persisted with severity from registry",
+        "Unit tests: a batch missing one XLSX yields V-FILE-1 blocker; an unparseable filename yields V-FILE-2; duplicate (account,period) yields V-FILE-6; clean fixture batch yields zero V-FILE findings",
+        "All quality checks pass"
+      ],
+      "priority": 8,
+      "passes": true,
+      "notes": "The engine is the foundation for ~30 rules across phases — keep check(ctx) signature generic (ctx has session, batch, statements). Severity must be data, not code branches."
+    },
+    {
+      "id": "US-009",
+      "title": "V-STMT math rules + zero-pay classification",
+      "description": "As an admin, I get proof every spreadsheet agrees with its summary PDF to the cent, and every $0 payable is explained.",
+      "acceptanceCriteria": [
+        "V-STMT-1: detail_sum == embedded_total (±0.02) -> blocker",
+        "V-STMT-2: detail_sum == pdf calculated; diff ≤0.02 pass, ≤5.00 warning, >5.00 blocker (PRD §7.2: real data shows ≤$1.02 rounding)",
+        "V-STMT-3: payable identity per PRD formula with None treated as 0 (old layout) -> blocker on violation; the C00650 fixture (payable 45,193.21 = 6,663.27 + 38,529.94 carryforward) and JN0080 (settlement netting) must pass",
+        "V-STMT-4: payable >= 0 -> blocker",
+        "V-STMT-5 (classification half only): set statement.zero_pay_reason for payable==0 statements (recouped if recouped<0, threshold_carryover if calculated>0, zero_earnings otherwise); unexplainable zero -> blocker finding",
+        "Decimal comparisons only — no float equality",
+        "Tests: all 7 fixtures validate clean (JN0249 classified recouped; C00739-New classified threshold_carryover); a deliberately corrupted in-memory statement triggers each rule",
+        "All quality checks pass"
+      ],
+      "priority": 9,
+      "passes": true,
+      "notes": "Ground truth in expected_values.json. V-STMT-6/7/8 are deliberately out (Phase 3 per PRD §11)."
+    },
+    {
+      "id": "US-010",
+      "title": "Read APIs + waiver workflow + end-to-end test",
+      "description": "As an admin (and the future RD frontend), I can list batches, drill into statements and findings, and waive/acknowledge findings with an audit trail.",
+      "acceptanceCriteria": [
+        "GET /admin/statements/batches?period=&status= list with stats; GET /admin/statements/batches/{id} detail incl. finding counts by severity",
+        "GET /admin/statements/batches/{id}/findings?severity=&status=; GET /admin/statements/batches/{id}/statements (key figures per statement); GET /admin/statements/{id} (account summary fields + validation status); GET /admin/statements/{id}/lines?page=&page_size= paginated",
+        "POST /admin/findings/{id}/waive {reason} (reason required, 422 without) and POST /admin/findings/{id}/acknowledge — both record actor (current user) and timestamp; waiving requires finding severity blocker|warning and status open",
+        "Pydantic response schemas in app/schemas/statements.py",
+        "End-to-end test: upload all 14 fixtures -> pipeline -> validate -> assert via API: 5 batches, 7 statements, 0 blockers, zero_pay_reasons correct, lines paginate (C00139a has 10,035 lines), waive flow round-trips",
+        "All quality checks pass"
+      ],
+      "priority": 10,
+      "passes": true,
+      "notes": "This is the API surface PRD §9 Phase-1 subset. Frontend wiring happens in a separate Ralph run on the RD repo."
+    }
+  ]
+}

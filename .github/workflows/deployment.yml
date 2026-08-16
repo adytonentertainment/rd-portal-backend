@@ -1,0 +1,68 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Choose deployment environment"
+        required: true
+        default: "development"
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      ENV: ${{ github.event.inputs.environment }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build & Deploy via SSH
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.VPS_IP }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+          
+            # Start SSH agent and add deploy key
+            eval "$(ssh-agent -s)"
+            ssh-add root/.ssh/tunescan_deploy_key
+        
+            # Define target directory based on environment
+            TARGET_DIR=/root/verax_backend_${{ env.ENV }}
+            
+            # Clone or update repository
+            if [ ! -d "$TARGET_DIR/" ]; then
+              git clone git@github.com:Verax-UG/verax_backend.git $TARGET_DIR
+              cd $TARGET_DIR
+              git checkout ${{ github.ref_name }}
+            else
+              cd $TARGET_DIR
+              git fetch origin ${{ github.ref_name }}
+              git checkout ${{ github.ref_name }}
+              git pull origin ${{ github.ref_name }}
+            fi
+
+            # Copy environment-specific secret file
+            cp -Tv -f /root/secrets/backend/.env.${{ env.ENV }} $TARGET_DIR/.env.${{ env.ENV }}
+
+            # Create virtual environment if it doesn't exist
+            if [ ! -d "$TARGET_DIR/env" ]; then
+              python3.10 -m venv $TARGET_DIR/env
+            fi
+
+            # Activate virtual environment and install dependencies
+            source $TARGET_DIR/env/bin/activate
+            pip install -r $TARGET_DIR/requirements.txt
+
+            # Run database migrations
+            cd $TARGET_DIR
+            alembic upgrade head
+
+            # Restart the appropriate systemd service
+            systemctl restart verax_backend_${{ env.ENV }}.service

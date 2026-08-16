@@ -1,0 +1,278 @@
+{
+  "presets": {
+    "budget_optimized_v1": {
+      "name": "Budget Optimized v1 (Type Beat)",
+      "version": "1.0.0",
+      "created": "2025-10-20",
+      "description": "Cost-optimized detection with type beat support. Tests 5 strategic segments, aggregates by title to handle multiple artists using same beat.",
+
+      "performance_stats": {
+        "avg_cost_per_track": 0.0475,
+        "avg_processing_time_seconds": 15,
+        "avg_api_calls": 15,
+        "cost_reduction_vs_exhaustive": "93%",
+        "tracks_per_dollar": 21,
+        "success_rate_98_percent": "67%",
+        "success_rate_correct_id": "100%"
+      },
+
+      "test_results": {
+        "total_tracks_tested": 6,
+        "tracks_above_threshold": 4,
+        "tracks_below_threshold": 2,
+        "examples": [
+          {
+            "track": "In Paris",
+            "confidence": 100,
+            "detections": 5,
+            "cost": 0.0475,
+            "time_seconds": 15.27,
+            "result": "PASS"
+          },
+          {
+            "track": "Lil X",
+            "confidence": 100,
+            "detections": 5,
+            "cost": 0.0475,
+            "time_seconds": 15.0,
+            "type_beat": true,
+            "artists": ["UnoTheActivist", "Cashoutbills"],
+            "result": "PASS"
+          },
+          {
+            "track": "Rolls Royce Umbrella",
+            "confidence": 90,
+            "detections": 2,
+            "cost": 0.0475,
+            "time_seconds": 16.37,
+            "result": "BELOW_THRESHOLD"
+          },
+          {
+            "track": "Hello Hi",
+            "confidence": 85,
+            "detections": 1,
+            "cost": 0.0475,
+            "time_seconds": 14.19,
+            "result": "BELOW_THRESHOLD",
+            "notes": "Multiple different titles detected - beat may sample multiple tracks"
+          }
+        ]
+      },
+
+      "settings": {
+        "sampling_strategy": {
+          "type": "strategic_segments",
+          "segments": [
+            {
+              "name": "Middle",
+              "position_formula": "duration / 2 - 10",
+              "duration_seconds": 20
+            },
+            {
+              "name": "Quarter",
+              "position_formula": "duration * 0.25 - 5",
+              "duration_seconds": 15
+            },
+            {
+              "name": "Three-Quarter",
+              "position_formula": "duration * 0.75 - 5",
+              "duration_seconds": 15
+            },
+            {
+              "name": "Start",
+              "position_formula": "0",
+              "duration_seconds": 12
+            },
+            {
+              "name": "End",
+              "position_formula": "duration - 15",
+              "duration_seconds": 12
+            }
+          ],
+          "total_segments": 5,
+          "rationale": "Focus on key parts: middle (hook/chorus), quarter points, start (intro), end (outro)"
+        },
+
+        "api_strategy": {
+          "order": ["audd", "acrcloud", "acoustid"],
+          "stop_on_high_confidence": true,
+          "high_confidence_threshold": 95,
+          "early_exit": {
+            "enabled": true,
+            "condition": "3+ detections of same song with 95%+ confidence"
+          }
+        },
+
+        "cost_controls": {
+          "max_budget_per_track": 1.0,
+          "api_costs": {
+            "audd": 0.0035,
+            "acrcloud": 0.006,
+            "acoustid": 0.0
+          },
+          "budget_warning_threshold": 0.8
+        },
+
+        "confidence_calculation": {
+          "aggregation_method": "by_title_only",
+          "aggregation_rationale": "Allows detection of type beats where multiple artists use same instrumental",
+
+          "base_confidence": {
+            "source": "api_response",
+            "calculation": "mean of all detection confidence scores"
+          },
+
+          "bonuses": {
+            "multi_detection": {
+              "5_plus": 20,
+              "4": 15,
+              "3": 12,
+              "2": 8,
+              "1": 0,
+              "description": "Aggressive bonus for multiple detections across segments"
+            },
+            "multi_api": {
+              "2_plus_apis": 10,
+              "1_api": 0,
+              "description": "Bonus when multiple APIs confirm same track"
+            },
+            "type_beat": {
+              "2_plus_artists": 5,
+              "1_artist": 0,
+              "description": "Bonus when multiple artists detected with same title (indicates real type beat)"
+            }
+          },
+
+          "min_confidence_threshold": 98.0,
+          "max_confidence_cap": 100.0
+        },
+
+        "type_beat_detection": {
+          "enabled": true,
+          "method": "multiple_artists_same_title",
+          "show_all_artists": true,
+          "primary_artist_selection": "most_detections"
+        },
+
+        "rate_limiting": {
+          "delay_between_calls_seconds": 0.2
+        }
+      },
+
+      "implementation_notes": {
+        "strengths": [
+          "93% cost reduction vs exhaustive scanning",
+          "Fast processing (~15s per track)",
+          "Handles type beats correctly",
+          "High accuracy for clear matches",
+          "Budget-controlled spending"
+        ],
+        "weaknesses": [
+          "May miss matches if they only appear in un-sampled segments",
+          "Lower success rate for tracks that sample multiple sources",
+          "Requires 2+ detections to reach 98% threshold",
+          "Instrumentals score lower than vocal versions (85% base)"
+        ],
+        "best_use_cases": [
+          "Type beat identification",
+          "Instrumental track matching",
+          "Budget-conscious bulk scanning",
+          "Quick identification of popular tracks"
+        ],
+        "not_recommended_for": [
+          "Highly obscure tracks",
+          "Tracks with extensive sampling from multiple sources",
+          "Tracks that significantly change throughout (should use exhaustive)"
+        ]
+      },
+
+      "comparison_to_exhaustive": {
+        "exhaustive_scanning": {
+          "avg_cost": 0.71,
+          "avg_api_calls": 138,
+          "avg_time_seconds": 147,
+          "segments_tested": "46+"
+        },
+        "budget_optimized": {
+          "avg_cost": 0.0475,
+          "avg_api_calls": 15,
+          "avg_time_seconds": 15,
+          "segments_tested": 5
+        },
+        "improvements": {
+          "cost_reduction": "93%",
+          "speed_increase": "90%",
+          "api_calls_reduction": "89%"
+        }
+      },
+
+      "future_improvements": {
+        "ideas": [
+          "Add adaptive segment count based on initial results",
+          "Implement machine learning to predict optimal sample points",
+          "Add genre-specific sampling strategies",
+          "Implement confidence score calibration based on historical accuracy",
+          "Add support for multi-track batch processing with shared budget",
+          "Implement ACRCloud fix to improve multi-API matches"
+        ],
+        "version_2_goals": {
+          "target_cost": 0.03,
+          "target_time": 10,
+          "target_success_rate": "80%",
+          "planned_changes": [
+            "Dynamic segment count (3-10 based on budget)",
+            "ACRCloud optimization",
+            "Genre detection for better sampling"
+          ]
+        }
+      }
+    },
+
+    "exhaustive_v1": {
+      "name": "Exhaustive Scanning v1",
+      "version": "1.0.0",
+      "created": "2025-10-20",
+      "description": "Original comprehensive detection with exhaustive segment sampling. Tests all segments across 4 different strategies.",
+
+      "performance_stats": {
+        "avg_cost_per_track": 0.71,
+        "avg_processing_time_seconds": 147,
+        "avg_api_calls": 138,
+        "success_rate_95_percent": "High",
+        "tracks_per_dollar": 1.4
+      },
+
+      "settings": {
+        "sampling_strategy": {
+          "type": "exhaustive_multi_strategy",
+          "strategies": [
+            {"name": "8s every 5s", "duration": 8, "interval": 5},
+            {"name": "12s every 8s", "duration": 12, "interval": 8},
+            {"name": "15s every 10s", "duration": 15, "interval": 10},
+            {"name": "20s every 15s", "duration": 20, "interval": 15}
+          ]
+        },
+        "min_confidence_threshold": 95.0
+      },
+
+      "implementation_notes": {
+        "strengths": [
+          "Maximum accuracy",
+          "Tests entire track thoroughly",
+          "Good for obscure tracks"
+        ],
+        "weaknesses": [
+          "Very expensive ($0.71 per track)",
+          "Slow (2.5 minutes per track)",
+          "Overkill for most use cases"
+        ]
+      }
+    }
+  },
+
+  "metadata": {
+    "last_updated": "2025-10-20",
+    "config_version": "1.0.0",
+    "default_preset": "budget_optimized_v1"
+  }
+}

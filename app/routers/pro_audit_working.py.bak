@@ -1,0 +1,1401 @@
+"""
+PRO Audit Tool - Full Scraper with Consent Handling
+Extracts actual registration data from ASCAP and BMI
+"""
+
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel
+from typing import Optional, List, Dict, Literal
+import asyncio
+import urllib.parse
+import json
+import re
+import random
+from playwright_stealth import Stealth
+
+app = FastAPI(title="PRO Audit Tool")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class SongInput(BaseModel):
+    title: str
+    performer: Optional[str] = None
+
+
+class AuditRequest(BaseModel):
+    writer_name: Optional[str] = None
+    writer_ipi: Optional[str] = None
+    publisher_name: Optional[str] = None
+    publisher_ipi: Optional[str] = None
+    songs: List[SongInput]
+
+
+def normalize_name(name: str) -> str:
+    """Normalize name for comparison - handles variations like 'Ed Sheeran' vs 'SHEERAN EDWARD'"""
+    # Replace special chars with spaces (so "Sony/ATV" becomes "Sony ATV"), then lowercase
+    name = re.sub(r'[^\w\s]', ' ', name.lower())
+
+    # Remove common business suffixes that cause false matches
+    business_suffixes = [
+        'publishing', 'pub', 'music', 'entertainment', 'records', 'recordings',
+        'llc', 'inc', 'corp', 'corporation', 'ltd', 'limited', 'co', 'company',
+        'sl', 'sa', 'gmbh', 'bv', 'nv', 'ag', 'plc',
+        'group', 'holdings', 'international', 'worldwide', 'global',
+        'productions', 'prod', 'studios', 'studio', 'media', 'enterprises'
+    ]
+
+    parts = name.split()
+    # Filter out business suffix words
+    filtered_parts = [p for p in parts if p not in business_suffixes]
+
+    # If all parts were filtered out, keep original parts
+    if not filtered_parts:
+        filtered_parts = parts
+
+    # Sort parts alphabetically to handle "First Last" vs "Last First"
+    return ' '.join(sorted(filtered_parts))
+
+
+def fuzzy_name_match(search_name: str, result_text: str) -> bool:
+    """Check if name appears in result text with fuzzy matching"""
+    if not search_name:
+        return False
+
+    search_normalized = normalize_name(search_name)
+    search_parts = set(search_normalized.split())
+
+    # Filter out very short parts (likely initials or noise)
+    meaningful_parts = [p for p in search_parts if len(p) > 2]
+
+    # If no meaningful parts after filtering, use original parts
+    if not meaningful_parts:
+        meaningful_parts = list(search_parts)
+
+    # Normalize result text too (remove business suffixes from it)
+    result_lower = result_text.lower()
+
+    print(f"[NAME MATCH] Searching for: '{search_name}' -> normalized: '{search_normalized}' -> parts: {meaningful_parts}")
+    print(f"[NAME MATCH] Result text sample (first 500 chars): {result_lower[:500]}...")
+
+    # Direct substring match (case insensitive) - but use normalized name
+    if search_normalized in normalize_name(result_text):
+        print(f"[NAME MATCH] ✓ MATCH via normalized substring")
+        return True
+
+    # Check if ALL meaningful name parts appear in result
+    # This is stricter - requires all significant parts to match
+    if len(meaningful_parts) >= 1:
+        matches = sum(1 for part in meaningful_parts if part in result_lower)
+        print(f"[NAME MATCH] Checking parts: {matches}/{len(meaningful_parts)} parts found in result")
+        # Require ALL meaningful parts to match (no missing allowed)
+        if matches == len(meaningful_parts):
+            print(f"[NAME MATCH] ✓ MATCH via all parts found")
+            return True
+
+    # Check for reversed name format "Last, First" or "LAST FIRST"
+    if len(meaningful_parts) == 2:
+        parts_list = list(meaningful_parts)
+        reversed_name = f"{parts_list[1]} {parts_list[0]}"
+        if reversed_name in result_lower:
+            print(f"[NAME MATCH] ✓ MATCH via reversed name")
+            return True
+        # Also try the other order
+        other_order = f"{parts_list[0]} {parts_list[1]}"
+        if other_order in result_lower:
+            print(f"[NAME MATCH] ✓ MATCH via other order")
+            return True
+
+    print(f"[NAME MATCH] ✗ NO MATCH")
+    return False
+
+
+def check_ipi_in_results(ipi: str, result_text: str) -> bool:
+    """Check if IPI number appears in result text"""
+    if not ipi:
+        print(f"[IPI CHECK] No IPI provided, skipping")
+        return False
+
+    # Clean IPI - remove any non-numeric chars for comparison
+    clean_ipi = re.sub(r'\D', '', ipi)
+
+    # Also try without leading zeros
+    clean_ipi_no_zeros = clean_ipi.lstrip('0')
+
+    print(f"[IPI CHECK] Looking for IPI: '{ipi}' (clean: '{clean_ipi}', no zeros: '{clean_ipi_no_zeros}')")
+    print(f"[IPI CHECK] Result text length: {len(result_text)}")
+
+    # Look for IPI patterns in the text
+    ipi_in_text = re.findall(r'\b\d{9,11}\b', result_text)
+    print(f"[IPI CHECK] All 9-11 digit numbers found in text: {ipi_in_text[:10]}")
+
+    # Look for IPI in various formats
+    # Full IPI number
+    if clean_ipi in result_text:
+        print(f"[IPI CHECK] Found clean IPI in text")
+        return True
+
+    # Without leading zeros
+    if clean_ipi_no_zeros and clean_ipi_no_zeros in result_text:
+        print(f"[IPI CHECK] Found IPI without leading zeros in text")
+        return True
+
+    # IPI with dashes or spaces
+    if ipi in result_text:
+        print(f"[IPI CHECK] Found original IPI in text")
+        return True
+
+    # Look for IPI label followed by number
+    ipi_patterns = [
+        rf'IPI[:\s#]*{clean_ipi}',
+        rf'IPI[:\s#]*{clean_ipi_no_zeros}',
+        rf'CAE[:\s#/]*{clean_ipi}',  # CAE is older name for IPI
+        rf'CAE[:\s#/]*{clean_ipi_no_zeros}',
+        rf'{clean_ipi}',  # Just the number
+    ]
+
+    for pattern in ipi_patterns:
+        if re.search(pattern, result_text, re.IGNORECASE):
+            print(f"[IPI CHECK] Found IPI with pattern: {pattern}")
+            return True
+
+    print(f"[IPI CHECK] IPI NOT FOUND in results")
+    return False
+
+
+def analyze_registration(
+    writer_name: Optional[str],
+    writer_ipi: Optional[str],
+    publisher_name: Optional[str],
+    publisher_ipi: Optional[str],
+    results: List[dict],
+    performer: Optional[str] = None
+) -> dict:
+    """Analyze if writer and/or publisher are properly registered in the results"""
+    if not results:
+        return {
+            'status': 'not_registered',
+            'writer_name_found': None,
+            'writer_ipi_found': None,
+            'publisher_name_found': None,
+            'publisher_ipi_found': None,
+            'performer_found': None,
+            'message': 'Song not found in database'
+        }
+
+    # Combine all result text for searching
+    all_text = ' '.join([r.get('raw', '') for r in results])
+
+    # Check performer first (if provided) - helps filter out wrong songs with same title
+    performer_found = fuzzy_name_match(performer, all_text) if performer else None
+    if performer and not performer_found:
+        print(f"[ANALYSIS] Performer '{performer}' not found in results - may be wrong song")
+
+    # Check writer
+    writer_name_found = fuzzy_name_match(writer_name, all_text) if writer_name else None
+    writer_ipi_found = check_ipi_in_results(writer_ipi, all_text) if writer_ipi else None
+
+    # Check publisher
+    publisher_name_found = fuzzy_name_match(publisher_name, all_text) if publisher_name else None
+    publisher_ipi_found = check_ipi_in_results(publisher_ipi, all_text) if publisher_ipi else None
+
+    # Determine overall status
+    # "registered" = all provided info found
+    # "collection_issue" = song found but some info missing
+    # "not_registered" = song not found
+
+    issues = []
+    registered_items = []
+
+    # Check writer status
+    if writer_name:
+        if writer_ipi:
+            if writer_name_found and writer_ipi_found:
+                registered_items.append("Writer (name + IPI)")
+            elif writer_name_found:
+                issues.append("Writer name found but IPI missing")
+            else:
+                issues.append("Writer not found")
+        else:
+            if writer_name_found:
+                registered_items.append("Writer (name)")
+            else:
+                issues.append("Writer not found")
+
+    # Check publisher status
+    if publisher_name:
+        if publisher_ipi:
+            if publisher_name_found and publisher_ipi_found:
+                registered_items.append("Publisher (name + IPI)")
+            elif publisher_name_found:
+                issues.append("Publisher name found but IPI missing")
+            else:
+                issues.append("Publisher not found")
+        else:
+            if publisher_name_found:
+                registered_items.append("Publisher (name)")
+            else:
+                issues.append("Publisher not found")
+
+    # Determine final status
+    if len(issues) == 0 and len(registered_items) > 0:
+        status = 'registered'
+        message = 'Properly registered: ' + ', '.join(registered_items)
+    elif len(registered_items) > 0:
+        status = 'collection_issue'
+        message = '; '.join(issues)
+    else:
+        status = 'collection_issue'
+        message = '; '.join(issues) if issues else 'Not associated with this registration'
+
+    return {
+        'status': status,
+        'writer_name_found': writer_name_found,
+        'writer_ipi_found': writer_ipi_found,
+        'publisher_name_found': publisher_name_found,
+        'publisher_ipi_found': publisher_ipi_found,
+        'performer_found': performer_found,
+        'message': message
+    }
+
+
+# Global browser instances for session persistence
+ascap_context = None
+bmi_context = None
+playwright_instance = None
+
+
+async def get_playwright():
+    """Get or create playwright instance"""
+    global playwright_instance
+    if playwright_instance is None:
+        from playwright.async_api import async_playwright
+        playwright_instance = await async_playwright().start()
+    return playwright_instance
+
+
+async def get_ascap_context():
+    """Get ASCAP browser context with cookies accepted"""
+    global ascap_context
+
+    if ascap_context is None:
+        pw = await get_playwright()
+        browser = await pw.chromium.launch(headless=True)
+        ascap_context = await browser.new_context(
+            viewport={'width': 1400, 'height': 900},
+            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        )
+
+    return ascap_context
+
+
+async def handle_ascap_consent(page):
+    """Handle ASCAP consent modal if present"""
+    try:
+        # Wait a moment for modal to appear
+        await page.wait_for_timeout(3000)
+
+        # Check for iframe - TrustArc often uses iframes
+        frames = page.frames
+        print(f"[ASCAP] Found {len(frames)} frames")
+
+        for frame in frames:
+            try:
+                # Try clicking in each frame
+                clicked = await frame.evaluate('''() => {
+                    const buttons = document.querySelectorAll('button, a, .call');
+                    for (const btn of buttons) {
+                        const text = (btn.innerText || btn.textContent || '').toUpperCase();
+                        if (text.includes('AGREE') && text.includes('PROCEED')) {
+                            btn.click();
+                            return 'clicked: ' + text;
+                        }
+                    }
+                    return null;
+                }''')
+                if clicked:
+                    print(f"[ASCAP] {clicked}")
+                    await page.wait_for_timeout(3000)
+                    return True
+            except:
+                continue
+
+        # Also try main page buttons with simpler text match
+        clicked = await page.evaluate('''() => {
+            const buttons = document.querySelectorAll('button, a, .call');
+            const found = [];
+            for (const btn of buttons) {
+                const text = (btn.innerText || btn.textContent || '');
+                found.push(text.substring(0, 50));
+                if (text.toUpperCase().includes('AGREE')) {
+                    btn.click();
+                    return 'clicked: ' + text;
+                }
+            }
+            return 'buttons found: ' + found.slice(0, 5).join(' | ');
+        }''')
+
+        print(f"[ASCAP] Result: {clicked}")
+        if clicked and clicked.startswith('clicked'):
+            await page.wait_for_timeout(3000)
+            return True
+
+        return False
+    except Exception as e:
+        print(f"[ASCAP] Consent handling error: {e}")
+        return False
+
+
+async def get_bmi_context():
+    """Get BMI browser context with disclaimer accepted"""
+    global bmi_context
+
+    if bmi_context is None:
+        pw = await get_playwright()
+        browser = await pw.chromium.launch(headless=True)
+        bmi_context = await browser.new_context(
+            viewport={'width': 1400, 'height': 900},
+            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        )
+
+    return bmi_context
+
+
+async def handle_bmi_consent(page):
+    """Handle BMI disclaimer and cookie consent"""
+    try:
+        await page.wait_for_timeout(3000)
+
+        # Handle cookie consent if present
+        try:
+            cookie_btn = page.locator('#onetrust-accept-btn-handler')
+            if await cookie_btn.count() > 0:
+                await cookie_btn.click()
+                print("[BMI] Clicked cookie consent")
+                await page.wait_for_timeout(1000)
+        except:
+            pass
+
+        # Scroll to bottom
+        await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+        await page.wait_for_timeout(2000)
+
+        # Try clicking the "I agree" link using various methods
+        # Method 1: Try JavaScript with broader search
+        clicked = await page.evaluate('''() => {
+            // Find all elements on the page
+            const allElements = document.querySelectorAll('*');
+            for (const el of allElements) {
+                const text = (el.innerText || el.textContent || '').trim();
+                // Look for "I agree" text (exact match, case sensitive)
+                if (text === 'I agree' && el.tagName !== 'BODY' && el.tagName !== 'HTML') {
+                    el.click();
+                    return 'clicked element: ' + el.tagName + ' - ' + text;
+                }
+            }
+
+            // Also look in links specifically
+            const links = document.querySelectorAll('a');
+            for (const link of links) {
+                const text = (link.innerText || link.textContent || '').trim();
+                if (text.toLowerCase().includes('agree') && !text.toLowerCase().includes('disagree')) {
+                    link.click();
+                    return 'clicked link: ' + text;
+                }
+            }
+            return null;
+        }''')
+
+        if clicked:
+            print(f"[BMI] {clicked}")
+            await page.wait_for_timeout(3000)
+            return True
+
+        # Method 2: Try using Playwright force click on coordinates
+        # The "I agree" button is typically at the bottom center-right of the disclaimer
+        try:
+            # Based on the screenshot, the button appears around these coordinates
+            await page.mouse.click(450, 420)  # Approximate position of "I agree"
+            print("[BMI] Clicked at approximate button position")
+            await page.wait_for_timeout(3000)
+
+            # Check if we navigated away from disclaimer
+            current_url = page.url
+            if 'disclaimer' not in current_url.lower():
+                return True
+        except:
+            pass
+
+        print("[BMI] No disclaimer button found - proceeding anyway")
+        return False
+    except Exception as e:
+        print(f"[BMI] Consent handling error: {e}")
+        return False
+
+
+async def search_ascap_api_via_browser(title: str) -> dict:
+    """Search ASCAP using their REST API via browser context to get proper session/cookies"""
+    try:
+        print(f"[ASCAP API] Searching for: {title}")
+
+        pw = await get_playwright()
+        browser = await pw.chromium.launch(headless=True)
+        context = await browser.new_context(
+            viewport={'width': 1400, 'height': 900},
+            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        )
+        page = await context.new_page()
+
+        # Navigate to the ACE search page to establish proper session
+        print("[ASCAP API] Loading ACE search page...")
+        await page.goto('https://www.ascap.com/repertory#ace/search/workID/all', wait_until='domcontentloaded', timeout=30000)
+        await page.wait_for_timeout(3000)
+
+        # Handle consent modals
+        for frame in page.frames:
+            try:
+                await frame.evaluate('''() => {
+                    const btns = document.querySelectorAll('button, a, .call');
+                    for (const btn of btns) {
+                        const text = (btn.innerText || '').toUpperCase();
+                        if (text.includes('AGREE') && text.includes('PROCEED')) {
+                            btn.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }''')
+            except:
+                continue
+        await page.wait_for_timeout(2000)
+
+        # Accept terms if shown
+        await page.evaluate('''() => {
+            const btns = document.querySelectorAll('button');
+            for (const btn of btns) {
+                const text = (btn.innerText || '').trim().toUpperCase();
+                if (text === 'I AGREE') {
+                    btn.click();
+                    return true;
+                }
+            }
+            return false;
+        }''')
+        await page.wait_for_timeout(2000)
+
+        # Now make the API call with proper cookies/session
+        encoded_title = urllib.parse.quote(title)
+        api_url = f'https://www.ascap.com/api/wservice/MobileWeb/service/ace/api/v2.0/works/details?limit=100&page=1&universe=IncludeATT&workTitle={encoded_title}'
+
+        print(f"[ASCAP API] Fetching: {api_url}")
+        response = await page.evaluate(f'''async () => {{
+            try {{
+                const resp = await fetch("{api_url}", {{
+                    headers: {{
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    }},
+                    credentials: 'include'
+                }});
+                console.log('API Response status:', resp.status);
+                if (!resp.ok) return {{ error: 'HTTP ' + resp.status }};
+                return await resp.json();
+            }} catch (e) {{
+                return {{ error: e.message }};
+            }}
+        }}''')
+
+        await browser.close()
+
+        if response.get('error'):
+            print(f"[ASCAP API] Error: {response['error']}")
+            return {'status': 'error', 'error': response['error'], 'results': []}
+
+        if response.get('result') is None:
+            error_desc = response.get('error', {}).get('description', 'Unknown error')
+            print(f"[ASCAP API] Error: {error_desc}")
+            return {'status': 'error', 'error': error_desc, 'results': []}
+
+        if response.get('result') == []:
+            print(f"[ASCAP API] No results found")
+            return {'status': 'not_found', 'count': 0, 'results': []}
+
+        results = []
+        for work in response['result']:
+            work_title = work.get('workTitle', '')
+            writers = []
+            publishers = []
+
+            for party in work.get('interestedParties', []):
+                party_info = {
+                    'name': party.get('fullName', ''),
+                    'ipi': party.get('ipiNumber', ''),
+                    'role': party.get('roleCde', '')
+                }
+                if party.get('roleCde') == 'W':
+                    writers.append(party_info)
+                elif party.get('roleCde') == 'P':
+                    publishers.append(party_info)
+
+            performers = [p.get('fullName', '') for p in (work.get('performers') or [])]
+
+            # Build raw text for name/IPI matching
+            raw_parts = [work_title]
+            for w in writers:
+                raw_parts.append(f"Writer: {w['name']} IPI: {w['ipi']}")
+            for p in publishers:
+                raw_parts.append(f"Publisher: {p['name']} IPI: {p['ipi']}")
+            for perf in performers:
+                raw_parts.append(f"Performer: {perf}")
+
+            results.append({
+                'raw': ' | '.join(raw_parts),
+                'title': work_title,
+                'writers': writers,
+                'publishers': publishers,
+                'performers': performers
+            })
+
+        print(f"[ASCAP API] Found {len(results)} results")
+        return {'status': 'found', 'count': len(results), 'results': results}
+
+    except Exception as e:
+        print(f"[ASCAP API] Error: {str(e)}")
+        return {'status': 'error', 'error': str(e)[:200], 'results': []}
+
+
+async def dismiss_ascap_tutorial(page):
+    """Helper to dismiss ASCAP tutorial modal and popups"""
+    dismissed = False
+
+    # Try clicking various close/dismiss buttons
+    close_selectors = [
+        'button:has-text("SKIP")',
+        'button:has-text("Skip")',
+        'button:has-text("Close")',
+        'button:has-text("Got it")',
+        'button:has-text("OK")',
+        '[aria-label="Close"]',
+        '.close-button',
+        '.modal-close',
+        'button.close'
+    ]
+
+    for selector in close_selectors:
+        try:
+            btn = page.locator(selector)
+            if await btn.count() > 0:
+                await btn.first.click(timeout=2000)
+                print(f"[ASCAP] Dismissed popup with: {selector}")
+                await page.wait_for_timeout(1000)
+                dismissed = True
+                break
+        except:
+            continue
+
+    # Press Escape multiple times to close any modals
+    for _ in range(3):
+        try:
+            await page.keyboard.press('Escape')
+            await page.wait_for_timeout(300)
+        except:
+            pass
+
+    return dismissed
+
+
+async def human_type(page, locator, text):
+    """Type text with human-like random delays"""
+    await locator.click()
+    await page.wait_for_timeout(random.randint(200, 500))
+    await locator.fill('')
+    await page.wait_for_timeout(random.randint(100, 300))
+
+    # Type each character with random delay
+    for char in text:
+        await page.keyboard.type(char, delay=random.randint(50, 150))
+        # Occasional longer pause (like thinking)
+        if random.random() < 0.1:
+            await page.wait_for_timeout(random.randint(100, 300))
+
+
+async def search_ascap_title(title: str, performer: Optional[str] = None) -> dict:
+    """Search ASCAP ACE database with stealth mode and human-like input"""
+    browser = None
+    context = None
+    page = None
+    try:
+        pw = await get_playwright()
+        browser = await pw.chromium.launch(
+            headless=True,
+            args=[
+                '--disable-blink-features=AutomationControlled',
+                '--disable-dev-shm-usage',
+                '--no-sandbox',
+                '--disable-gpu',
+                '--disable-software-rasterizer',
+            ]
+        )
+        context = await browser.new_context(
+            viewport={'width': 1400, 'height': 900},
+            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            locale='en-US',
+            timezone_id='America/New_York',
+        )
+        page = await context.new_page()
+
+        # Apply stealth mode to bypass headless detection
+        stealth = Stealth(navigator_platform_override='MacIntel')
+        await stealth.apply_stealth_async(page)
+
+        # Search by title only - performer is used for result verification, not search
+        search_term = title
+        print(f"[ASCAP] Searching for: {search_term}" + (f" (will verify performer: {performer})" if performer else ""), flush=True)
+
+        # Navigate to repertory page
+        print(f"[ASCAP] Loading repertory page...", flush=True)
+        await page.goto('https://www.ascap.com/repertory', wait_until='domcontentloaded', timeout=60000)
+        await page.wait_for_timeout(3000)
+
+        # Handle Policy Updates / cookie consent modal (may be in iframe)
+        print("[ASCAP] Checking for consent modal...", flush=True)
+        consent_clicked = False
+
+        # Try main page first
+        try:
+            agree_btn = page.locator('button:text("AGREE AND PROCEED")')
+            if await agree_btn.count() > 0:
+                await agree_btn.click(timeout=5000)
+                print("[ASCAP] Clicked AGREE AND PROCEED on main page", flush=True)
+                consent_clicked = True
+        except:
+            pass
+
+        # Try iframes (TrustArc consent is often in iframe)
+        if not consent_clicked:
+            for frame in page.frames:
+                try:
+                    agree_btn = frame.locator('button:text("AGREE AND PROCEED"), a:text("AGREE AND PROCEED"), .call:text("AGREE AND PROCEED")')
+                    if await agree_btn.count() > 0:
+                        await agree_btn.first.click(timeout=5000)
+                        print("[ASCAP] Clicked AGREE AND PROCEED in iframe", flush=True)
+                        consent_clicked = True
+                        break
+                except:
+                    continue
+
+        # Fallback: try clicking by coordinates where button typically appears
+        if not consent_clicked:
+            try:
+                await page.click('text=AGREE AND PROCEED', timeout=5000)
+                print("[ASCAP] Clicked AGREE AND PROCEED via text", flush=True)
+                consent_clicked = True
+            except:
+                print("[ASCAP] Could not find consent button", flush=True)
+
+        if consent_clicked:
+            await page.wait_for_timeout(3000)
+
+        # Navigate to ACE search page (not using URL hash - it doesn't trigger Angular search)
+        print(f"[ASCAP] Navigating to ACE search page...", flush=True)
+        await page.goto('https://www.ascap.com/repertory#ace/search/workID/all', wait_until='networkidle', timeout=60000)
+        await page.wait_for_timeout(5000)
+
+        # Take screenshot
+        await page.screenshot(path='/tmp/ascap_after_load.png')
+        print("[ASCAP] Screenshot saved after page load", flush=True)
+
+        # Accept I AGREE terms if shown (Terms and Conditions modal)
+        try:
+            agree = page.locator('button:text("I AGREE")')
+            if await agree.count() > 0:
+                await agree.first.click(timeout=3000)
+                print("[ASCAP] Clicked I AGREE", flush=True)
+                await page.wait_for_timeout(3000)
+        except:
+            pass
+
+        # Dismiss tutorial popup
+        await dismiss_ascap_tutorial(page)
+
+        # Find and fill the ACE search input field (NOT the nav search)
+        print(f"[ASCAP] Looking for ACE search input field...", flush=True)
+
+        # Use JavaScript to find all inputs and identify the correct one
+        # The nav search has class 'search-input', we want the ACE form input
+        input_info = await page.evaluate('''() => {
+            const inputs = document.querySelectorAll('input[type="text"], input:not([type])');
+            const results = [];
+            for (const inp of inputs) {
+                const rect = inp.getBoundingClientRect();
+                const classes = inp.className;
+                const id = inp.id;
+                const placeholder = inp.placeholder;
+                const name = inp.name;
+                // Check if visible and in the main content area (x > 200 means not in left sidebar)
+                if (rect.width > 0 && rect.height > 0 && rect.x > 200) {
+                    results.push({
+                        x: rect.x,
+                        y: rect.y,
+                        width: rect.width,
+                        classes: classes,
+                        id: id,
+                        placeholder: placeholder,
+                        name: name,
+                        isNavSearch: classes.includes('search-input')
+                    });
+                }
+            }
+            return results;
+        }''')
+        print(f"[ASCAP] Found inputs: {input_info}", flush=True)
+
+        # Target the specific ACE form inputs by name attribute
+        # From logs: quaverTextInput-25 with name="searchTerm" is the title field
+        print("[ASCAP] Looking for searchTerm input by name...", flush=True)
+
+        # Use human-like typing for the inputs
+        performer_filled = False  # Track if performer was filled (for retry logic)
+        try:
+            # Random delay before starting (human would look at page first)
+            await page.wait_for_timeout(random.randint(500, 1500))
+
+            # Fill the Title field with human-like typing - use .first to avoid strict mode
+            title_input = page.locator('input[name="searchTerm"]').first
+            if await title_input.is_visible():
+                # Move mouse to input area first (human-like)
+                box = await title_input.bounding_box()
+                if box:
+                    await page.mouse.move(box['x'] + box['width']/2, box['y'] + box['height']/2)
+                    await page.wait_for_timeout(random.randint(100, 300))
+
+                await human_type(page, title_input, search_term)
+                print(f"[ASCAP] Typed title: {search_term}", flush=True)
+            else:
+                print("[ASCAP] ERROR: Title input not found", flush=True)
+
+            # Fill performer field for initial search
+            # If 0 results, we'll retry with title-only
+            if performer:
+                performer_input = page.locator('input[name="searchTermTwo"]').first
+                if await performer_input.is_visible():
+                    box = await performer_input.bounding_box()
+                    if box:
+                        await page.mouse.move(box['x'] + box['width']/2, box['y'] + box['height']/2)
+                        await page.wait_for_timeout(random.randint(100, 300))
+                    await human_type(page, performer_input, performer)
+                    print(f"[ASCAP] Typed performer: {performer}", flush=True)
+                    performer_filled = True
+
+            await page.wait_for_timeout(random.randint(500, 1000))
+            await page.screenshot(path='/tmp/ascap_after_type.png')
+
+            # Click the ACE SEARCH button using JavaScript to target the correct one
+            # The ACE form button is in the same section as the searchTerm inputs
+            click_result = await page.evaluate('''() => {
+                // Find the search button that's near the ACE form inputs
+                const titleInput = document.querySelector('input[name="searchTerm"]');
+                if (!titleInput) return { clicked: false, error: 'Title input not found' };
+
+                // Find the parent form/container and look for SEARCH button within it
+                let container = titleInput.closest('.search-container, .ace-search, form, [class*="search"]');
+                if (!container) {
+                    // Walk up to find a reasonable container
+                    container = titleInput.parentElement?.parentElement?.parentElement?.parentElement;
+                }
+
+                if (container) {
+                    // Look for button with text SEARCH within the container
+                    const buttons = container.querySelectorAll('button');
+                    for (const btn of buttons) {
+                        const text = (btn.innerText || btn.textContent || '').trim().toUpperCase();
+                        if (text === 'SEARCH' || text.includes('SEARCH')) {
+                            btn.click();
+                            return { clicked: true, text: text };
+                        }
+                    }
+                }
+
+                // Fallback: find button with specific text that's visible and in main content area
+                const allButtons = document.querySelectorAll('button');
+                for (const btn of allButtons) {
+                    const rect = btn.getBoundingClientRect();
+                    const text = (btn.innerText || btn.textContent || '').trim().toUpperCase();
+                    // Button should be visible, in the right area (not nav), and say SEARCH
+                    if (text === 'SEARCH' && rect.x > 250 && rect.y > 150 && rect.y < 500) {
+                        btn.click();
+                        return { clicked: true, text: text, x: rect.x, y: rect.y };
+                    }
+                }
+
+                return { clicked: false, error: 'ACE search button not found' };
+            }''')
+            print(f"[ASCAP] Search button click result: {click_result}", flush=True)
+
+            if not click_result.get('clicked'):
+                # Fallback to pressing Enter on the title input
+                await title_input.press('Enter')
+                print("[ASCAP] Pressed Enter to submit", flush=True)
+
+        except Exception as e:
+            print(f"[ASCAP] Input error: {e}", flush=True)
+            # Fallback to JavaScript approach
+            print("[ASCAP] Trying JavaScript fallback...", flush=True)
+            performer_js = performer if performer else ""
+            await page.evaluate(f'''() => {{
+                const titleInp = document.querySelector('input[name="searchTerm"]');
+                if (titleInp) {{
+                    titleInp.focus();
+                    titleInp.value = "{search_term}";
+                    titleInp.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    titleInp.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                }}
+                const perfInp = document.querySelector('input[name="searchTermTwo"]');
+                if (perfInp && "{performer_js}") {{
+                    perfInp.focus();
+                    perfInp.value = "{performer_js}";
+                    perfInp.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    perfInp.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                }}
+            }}''')
+            await page.wait_for_timeout(500)
+            await page.keyboard.press('Enter')
+            print("[ASCAP] JS fallback - pressed Enter", flush=True)
+
+        print(f"[ASCAP] Waiting for search results...", flush=True)
+
+        # Wait for results or Terms modal
+        print("[ASCAP] Waiting for search results...", flush=True)
+        await page.wait_for_timeout(3000)
+
+        # Handle Terms and Conditions modal that appears after search
+        print("[ASCAP] Checking for Terms modal...", flush=True)
+        try:
+            terms_agree = page.locator('button:text("I AGREE")')
+            if await terms_agree.count() > 0:
+                await terms_agree.first.click(timeout=5000)
+                print("[ASCAP] Clicked I AGREE on Terms modal", flush=True)
+                await page.wait_for_timeout(3000)
+        except Exception as e:
+            print(f"[ASCAP] No Terms modal: {e}", flush=True)
+
+        # Dismiss tutorial popup that may appear after Terms
+        await dismiss_ascap_tutorial(page)
+        await dismiss_ascap_tutorial(page)
+
+        # Wait for results to load (using ACE/ASCAP-only filter)
+        await page.wait_for_timeout(3000)
+
+        # Take screenshot after terms
+        await page.screenshot(path='/tmp/ascap_after_terms.png')
+
+        # Wait for results to load
+        print("[ASCAP] Waiting for results...", flush=True)
+        await page.wait_for_timeout(5000)
+
+        # Take debug screenshot
+        await page.screenshot(path=f'/tmp/ascap_debug_{title[:20].replace(" ", "_")}.png')
+        print("[ASCAP] Screenshot saved")
+
+        # Check the page content
+        body_text = await page.inner_text('body')
+        print(f"[ASCAP] Page text preview: {body_text[:300]}...")
+
+        # Look for result count indicator
+        result_count = await page.evaluate('''() => {
+            // Look for "X results" or "Showing X" patterns
+            const text = document.body.innerText;
+            const match = text.match(/(\d+)\s*results?/i) || text.match(/showing\s*(\d+)/i);
+            return match ? parseInt(match[1]) : 0;
+        }''')
+        print(f"[ASCAP] Result count detected: {result_count}")
+
+        # RETRY LOGIC: If 0 results and performer was filled, try title-only search
+        if result_count == 0 and performer_filled:
+            print(f"[ASCAP] RETRY: 0 results with performer, navigating to fresh search for '{search_term}'", flush=True)
+
+            try:
+                # Navigate back to ACE search page for a fresh search
+                await page.goto('https://www.ascap.com/repertory#ace', timeout=30000)
+                await page.wait_for_timeout(3000)
+
+                # Handle any consent modals
+                await dismiss_ascap_tutorial(page)
+                try:
+                    terms_agree = page.locator('button:text("I AGREE")')
+                    if await terms_agree.count() > 0:
+                        await terms_agree.first.click(timeout=3000)
+                        await page.wait_for_timeout(1000)
+                except:
+                    pass
+
+                # Wait for search form to be ready
+                await page.wait_for_timeout(2000)
+
+                # Fill in title only (no performer) - use .first to avoid strict mode violation
+                title_input = page.locator('input[name="searchTerm"]').first
+                if await title_input.is_visible():
+                    await human_type(page, title_input, search_term)
+                    print(f"[ASCAP] RETRY: Typed title only: {search_term}", flush=True)
+                else:
+                    print(f"[ASCAP] RETRY: Title input not visible", flush=True)
+
+                # Click search
+                await page.evaluate('''() => {
+                    const titleInput = document.querySelector('input[name="searchTerm"]');
+                    if (!titleInput) return;
+                    let container = titleInput.closest('.search-container, .ace-search, form, [class*="search"]');
+                    if (!container) container = titleInput.parentElement?.parentElement?.parentElement?.parentElement;
+                    if (container) {
+                        const buttons = container.querySelectorAll('button');
+                        for (const btn of buttons) {
+                            const text = (btn.innerText || btn.textContent || '').trim().toUpperCase();
+                            if (text === 'SEARCH' || text.includes('SEARCH')) { btn.click(); return; }
+                        }
+                    }
+                }''')
+
+                # Wait for retry results
+                print("[ASCAP] RETRY: Waiting for results...", flush=True)
+                await page.wait_for_timeout(5000)
+
+                # Handle any modals that appear
+                try:
+                    terms_agree = page.locator('button:text("I AGREE")')
+                    if await terms_agree.count() > 0:
+                        await terms_agree.first.click(timeout=3000)
+                        await page.wait_for_timeout(2000)
+                except:
+                    pass
+                await dismiss_ascap_tutorial(page)
+                await page.wait_for_timeout(3000)
+
+                # Re-check result count
+                body_text = await page.inner_text('body')
+                result_count = await page.evaluate('''() => {
+                    const text = document.body.innerText;
+                    const match = text.match(/(\d+)\s*results?/i) || text.match(/showing\s*(\d+)/i);
+                    return match ? parseInt(match[1]) : 0;
+                }''')
+                print(f"[ASCAP] RETRY: Result count after title-only: {result_count}")
+            except Exception as retry_err:
+                print(f"[ASCAP] RETRY: Error during retry: {retry_err}", flush=True)
+
+        results = []
+
+        # Try to find the results table/list
+        # ASCAP ACE uses Angular Material tables
+        rows = await page.query_selector_all('table tbody tr, .mat-row, [class*="result-row"], [class*="work-row"]')
+        print(f"[ASCAP] Found {len(rows)} potential result rows")
+
+        for row in rows[:20]:
+            try:
+                text = await row.inner_text()
+                if text.strip() and len(text.strip()) > 10:
+                    # Skip headers
+                    if text.strip().upper().startswith('TITLE') or text.strip().upper().startswith('WORK'):
+                        continue
+                    results.append({'raw': text.strip()})
+            except:
+                continue
+
+        # If no rows found, try to extract from the whole page
+        if not results and title.lower() in body_text.lower():
+            # Try to find structured data in the page
+            structured = await page.evaluate('''() => {
+                const results = [];
+                // Look for any elements with work/song info
+                const items = document.querySelectorAll('[class*="work"], [class*="result"], [class*="song"]');
+                for (const item of items) {
+                    const text = item.innerText;
+                    if (text && text.length > 20) {
+                        results.push(text.substring(0, 500));
+                    }
+                }
+                return results;
+            }''')
+            for item in structured[:10]:
+                if item.strip():
+                    results.append({'raw': item.strip()})
+
+        # Try clicking "Expand All" to get IPIs
+        expand = await page.evaluate('''() => {
+            const btns = document.querySelectorAll('button, a, span');
+            for (const btn of btns) {
+                const text = (btn.innerText || '').toUpperCase();
+                if (text.includes('EXPAND')) {
+                    btn.click();
+                    return true;
+                }
+            }
+            return false;
+        }''')
+        if expand:
+            print("[ASCAP] Clicked expand")
+            await page.wait_for_timeout(3000)
+            # Re-capture body text with expanded info
+            body_text = await page.inner_text('body')
+
+        # Add full body text for IPI matching
+        if results or title.lower() in body_text.lower():
+            results.append({'raw': body_text[:5000]})
+
+        # Save final screenshot
+        await page.screenshot(path=f'/tmp/ascap_final_{title[:20].replace(" ", "_")}.png')
+
+        if results:
+            return {'status': 'found', 'count': len(results), 'results': results}
+
+        return {'status': 'not_found', 'count': 0, 'results': []}
+
+    except Exception as e:
+        print(f"[ASCAP] Error: {str(e)}")
+        return {'status': 'error', 'error': str(e)[:200], 'results': []}
+    finally:
+        # Always close browser resources
+        try:
+            if page:
+                await page.close()
+        except:
+            pass
+        try:
+            if context:
+                await context.close()
+        except:
+            pass
+        try:
+            if browser:
+                await browser.close()
+        except:
+            pass
+
+
+async def search_bmi_title(title: str) -> dict:
+    """Search BMI by title and extract results"""
+    try:
+        context = await get_bmi_context()
+
+        # Try to set a cookie that indicates disclaimer acceptance
+        await context.add_cookies([{
+            'name': 'BMI_Disclaimer_Accepted',
+            'value': 'true',
+            'domain': 'repertoire.bmi.com',
+            'path': '/'
+        }, {
+            'name': 'disclaimerAccepted',
+            'value': 'true',
+            'domain': 'repertoire.bmi.com',
+            'path': '/'
+        }])
+
+        page = await context.new_page()
+
+        print(f"[BMI] Searching for: {title}")
+
+        # Try going directly to search URL
+        encoded_title = urllib.parse.quote(title)
+        url = f'https://repertoire.bmi.com/Search/Search?query={encoded_title}&queryType=Title'
+
+        await page.goto(url, wait_until='domcontentloaded', timeout=60000)
+        await page.wait_for_timeout(3000)
+
+        # Check if we're on disclaimer page
+        current_url = page.url
+        body = await page.inner_text('body')
+
+        if 'disclaimer' in current_url.lower() or 'disclaimer' in body.lower()[:500]:
+            print("[BMI] Still on disclaimer page, handling consent...")
+            await handle_bmi_consent(page)
+
+            # Navigate again after consent
+            await page.goto(url, wait_until='domcontentloaded', timeout=60000)
+
+        # Wait for results to load
+        await page.wait_for_timeout(5000)
+
+        # Take debug screenshot
+        await page.screenshot(path=f'/tmp/bmi_debug_{title[:20].replace(" ", "_")}.png')
+        print(f"[BMI] Screenshot saved")
+
+        # Extract results - try multiple selectors
+        results = []
+
+        # First check if we're still on disclaimer page
+        body_text = await page.inner_text('body')
+        if 'disclaimer' in body_text.lower()[:1000]:
+            print("[BMI] Still on disclaimer - no actual results")
+            await page.close()
+            return {'status': 'not_found', 'count': 0, 'results': [], 'note': 'Blocked by disclaimer'}
+
+        selectors_to_try = [
+            'table tbody tr',
+            '.search-results tr',
+            '[class*="result"] tr',
+            '.work-row',
+            '[class*="work"]',
+            'tr[data-work-id]',
+            '.result-item'
+        ]
+
+        # Keywords that indicate header/navigation, not results
+        skip_keywords = ['about', 'creators', 'music users', 'news', 'video', 'advocacy',
+                        'disclaimer', 'login', 'search', 'help', 'contact', 'sitemap']
+
+        for selector in selectors_to_try:
+            rows = await page.query_selector_all(selector)
+            if rows:
+                print(f"[BMI] Found {len(rows)} rows with selector: {selector}")
+                for row in rows[:20]:
+                    try:
+                        text = await row.inner_text()
+                        text_lower = text.strip().lower()
+
+                        # Skip if too short or contains nav keywords
+                        if len(text.strip()) < 20:
+                            continue
+                        if any(kw in text_lower[:50] for kw in skip_keywords):
+                            continue
+                        # Skip header rows
+                        if text_lower.startswith('title') or text_lower.startswith('work'):
+                            continue
+
+                        results.append({'raw': text.strip()[:500]})
+                    except:
+                        continue
+                if results:
+                    break
+
+        # Fallback: check body text for results
+        if not results:
+            body_text = await page.inner_text('body')
+            print(f"[BMI] Body text length: {len(body_text)}")
+
+            # Check for results indication
+            import re
+            if title.lower() in body_text.lower():
+                match = re.search(r'(\d+)\s*results?', body_text.lower())
+                if match:
+                    count = int(match.group(1))
+                    if count > 0:
+                        results.append({'raw': f'Found {count} results for {title}'})
+
+        await page.close()
+
+        if results:
+            return {'status': 'found', 'count': len(results), 'results': results}
+
+        return {'status': 'not_found', 'count': 0, 'results': []}
+
+    except Exception as e:
+        print(f"[BMI] Error: {str(e)}")
+        return {'status': 'error', 'error': str(e)[:200], 'results': []}
+
+
+@app.get("/")
+async def root():
+    return FileResponse("static/index.html")
+
+
+@app.post("/api/audit")
+async def audit_catalog(request: AuditRequest):
+    """Audit songs - check registration and collection status"""
+    results = []
+
+    for song_input in request.songs:
+        if not song_input.title.strip():
+            continue
+
+        title = song_input.title.strip()
+        performer = song_input.performer.strip() if song_input.performer else None
+
+        # Search ASCAP (includes Songview data for both ASCAP and BMI)
+        ascap_result = await search_ascap_title(title, performer)
+
+        # Analyze registration status for both writer and publisher
+        analysis = analyze_registration(
+            writer_name=request.writer_name,
+            writer_ipi=request.writer_ipi,
+            publisher_name=request.publisher_name,
+            publisher_ipi=request.publisher_ipi,
+            results=ascap_result.get('results', []),
+            performer=performer
+        )
+
+        # Determine overall status
+        if ascap_result.get('status') != 'found':
+            status = 'not_registered'
+            analysis['status'] = 'not_registered'
+            analysis['message'] = 'Song not found in PRO database'
+        else:
+            status = analysis['status']
+
+        results.append({
+            'title': title,
+            'performer': performer,
+            'status': status,
+            'analysis': analysis,
+            'ascap': ascap_result
+        })
+
+        # Small delay between searches
+        await asyncio.sleep(1)
+
+    # Summary counts
+    registered = sum(1 for r in results if r['status'] == 'registered')
+    collection_issue = sum(1 for r in results if r['status'] == 'collection_issue')
+    not_registered = sum(1 for r in results if r['status'] == 'not_registered')
+
+    return {
+        "user": {
+            "writer_name": request.writer_name,
+            "writer_ipi": request.writer_ipi,
+            "publisher_name": request.publisher_name,
+            "publisher_ipi": request.publisher_ipi
+        },
+        "summary": {
+            "total": len(results),
+            "registered": registered,
+            "collection_issue": collection_issue,
+            "not_registered": not_registered
+        },
+        "songs": results,
+        "status": "success"
+    }
+
+
+@app.post("/api/audit/stream")
+async def audit_catalog_stream(request: AuditRequest):
+    """Audit songs with real-time progress updates via SSE"""
+
+    async def generate():
+        results = []
+        total = len([s for s in request.songs if s.title.strip()])
+
+        # Send initial status
+        yield f"data: {json.dumps({'type': 'start', 'total': total})}\n\n"
+
+        for idx, song_input in enumerate(request.songs):
+            if not song_input.title.strip():
+                continue
+
+            title = song_input.title.strip()
+            performer = song_input.performer.strip() if song_input.performer else None
+            display_name = f"{title}" + (f" ({performer})" if performer else "")
+
+            # Send progress update
+            yield f"data: {json.dumps({'type': 'progress', 'current': idx + 1, 'total': total, 'song': display_name, 'status': 'searching'})}\n\n"
+
+            # Search ASCAP with optional performer
+            ascap_result = await search_ascap_title(title, performer)
+
+            # Analyze registration
+            analysis = analyze_registration(
+                writer_name=request.writer_name,
+                writer_ipi=request.writer_ipi,
+                publisher_name=request.publisher_name,
+                publisher_ipi=request.publisher_ipi,
+                results=ascap_result.get('results', []),
+                performer=performer
+            )
+
+            if ascap_result.get('status') != 'found':
+                status = 'not_registered'
+                analysis['status'] = 'not_registered'
+                analysis['message'] = 'Song not found in PRO database'
+            else:
+                status = analysis['status']
+
+            song_result = {
+                'title': title,
+                'performer': performer,
+                'status': status,
+                'analysis': analysis,
+                'ascap': ascap_result
+            }
+            results.append(song_result)
+
+            # Send song completed update
+            yield f"data: {json.dumps({'type': 'song_complete', 'current': idx + 1, 'total': total, 'song': song_result})}\n\n"
+
+            await asyncio.sleep(0.5)
+
+        # Send final summary
+        registered = sum(1 for r in results if r['status'] == 'registered')
+        collection_issue = sum(1 for r in results if r['status'] == 'collection_issue')
+        not_registered = sum(1 for r in results if r['status'] == 'not_registered')
+
+        final_result = {
+            "type": "complete",
+            "user": {
+                "writer_name": request.writer_name,
+                "writer_ipi": request.writer_ipi,
+                "publisher_name": request.publisher_name,
+                "publisher_ipi": request.publisher_ipi
+            },
+            "summary": {
+                "total": len(results),
+                "registered": registered,
+                "collection_issue": collection_issue,
+                "not_registered": not_registered
+            },
+            "songs": results,
+            "status": "success"
+        }
+        yield f"data: {json.dumps(final_result)}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
+@app.post("/api/search/ascap")
+async def search_ascap_endpoint(title: str):
+    """Search ASCAP for a single title"""
+    result = await search_ascap_title(title)
+    return result
+
+
+@app.post("/api/search/bmi")
+async def search_bmi_endpoint(title: str):
+    """Search BMI for a single title"""
+    result = await search_bmi_title(title)
+    return result
+
+
+@app.get("/api/health")
+async def health():
+    return {"status": "ok", "service": "PRO Audit Tool", "mode": "full_scraper"}
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    """Cleanup browser contexts on shutdown"""
+    global ascap_context, bmi_context, playwright_instance
+    if ascap_context:
+        await ascap_context.close()
+    if bmi_context:
+        await bmi_context.close()
+    if playwright_instance:
+        await playwright_instance.stop()
+
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8080)

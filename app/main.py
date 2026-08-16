@@ -228,6 +228,18 @@ app.add_middleware(
     expose_headers=["Content-Type", "Content-Disposition"],
 )
 
+@app.get("/healthz", include_in_schema=False)
+async def healthz():
+    """Liveness probe for the deploy platform.
+
+    Must be unauthenticated and return 2xx: Render marks a service unhealthy on
+    anything else and times the deploy out after 15 minutes, even though the app
+    started cleanly. Pointing the check at an admin route returned 401 and did
+    exactly that.
+    """
+    return {"status": "ok"}
+
+
 create_tables()
 
 if __name__ == "__main__":

@@ -34,7 +34,12 @@ from app.models.statements import (
     UploadStatus,
     Writer,
 )
-from app.services.client_import.matcher import _pre_paren, _token_set, normalize
+from app.services.client_import.matcher import (
+    _identity_forms,
+    _pre_paren,
+    _token_set,
+    normalize,
+)
 from app.services.statement_ingest.filename_parser import (
     ParsedStatementFilename,
     parse_statement_filename,
@@ -135,7 +140,18 @@ def _match_existing_writer(session: Session, parsed: ParsedStatementFilename):
     placeholder). Reuses the client-import matcher's normalize/token logic so
     ingest and the resolver agree on what "the same client" means."""
     target = parsed.display_name or ""
-    target_keys = {normalize(target), normalize(_pre_paren(target))} - {""}
+    # Share ONE definition of "same entity" with the client-import matcher.
+    #
+    # This used to be just {normalize(name), normalize(pre_paren(name))}, which
+    # meant the two paths disagreed and the result depended on UPLOAD ORDER:
+    # importing the client list first linked nothing (no accounts existed yet),
+    # so every account was resolved later by this weaker rule and "AJCastillo"
+    # never met "AJ Castillo". Statements-first happened to work because the
+    # strong matcher ran at import time. _identity_forms covers the real-world
+    # variations in these filenames: dropped spaces ("Los Tucanes DeTijuana"),
+    # "/" alias lists ("Akwid / AkwidAfterVydia") and " - " splits
+    # ("AMS Records - Malagon Publishing").
+    target_keys = _identity_forms(target)
     # Fuzzy matching compares the PRE-PARENTHETICAL name (the actual entity),
     # never the full string: a group tag like "(Luna Negra)" is shared by every
     # member of that group ("Edimusin (Luna Negra)", "Isa Music (Luna Negra)"),
@@ -156,14 +172,26 @@ def _match_existing_writer(session: Session, parsed: ParsedStatementFilename):
         return (w.kind is None, w.id)
 
     # 1) exact normalized name (incl. group-parenthetical-stripped forms)
-    exact = [
-        w
-        for w in candidates
-        if {normalize(w.canonical_name), normalize(_pre_paren(w.canonical_name))}
-        & target_keys
-    ]
-    if exact:
-        return sorted(exact, key=_prefer)[0]
+    # Rank by STRENGTH, not just overlap. "Don Kalavera (Mastered Trax)" shares
+    # its pre-parenthetical form with "Don Kalavera (Loudness Music)", so a flat
+    # overlap test picks whichever has the lower id — paying the wrong client.
+    # A full-name equality always outranks an alias/pre-paren hit, and only the
+    # strongest band is considered.
+    def _full_forms(name):
+        n = normalize(name)
+        return {f for f in (n, n.replace(" ", "")) if f}
+
+    target_full = _full_forms(target)
+    scored = []
+    for w in candidates:
+        if _full_forms(w.canonical_name) & target_full:
+            scored.append((2, w))
+        elif _identity_forms(w.canonical_name) & target_keys:
+            scored.append((1, w))
+    if scored:
+        best = max(rank for rank, _ in scored)
+        top = [w for rank, w in scored if rank == best]
+        return sorted(top, key=_prefer)[0]
 
     # 2) strict token-subset only ("X" vs "X NEW"/"X <surname>"): the shorter
     # side must keep ≥2 distinctive tokens so a single shared word never folds

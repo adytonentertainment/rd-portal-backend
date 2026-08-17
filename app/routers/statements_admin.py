@@ -115,6 +115,40 @@ def _record_files(upload: StatementUpload, written, ignored) -> dict:
     return stats
 
 
+def _safe_manifest_name(raw) -> str:
+    """Manifest names must match how files are stored: basename only."""
+    return os.path.basename((raw or "").replace("\\", "/")).strip()
+
+
+def _verify_manifest(upload: StatementUpload):
+    """Which declared files are missing, and which arrived the wrong size.
+
+    The client declares what it intends to send; finalize refuses to release the
+    upload until every one of those files is on disk at its declared byte size.
+    This is the only completeness guarantee in the pipeline — statement
+    validation is deliberately disabled — so a royalty period is never marked
+    complete on the client's say-so. It also produces the exact list a resume
+    needs to re-send.
+    """
+    stats = upload.stats or {}
+    manifest = stats.get("manifest")
+    if not manifest:
+        # Uploads created before manifests existed: fall back to "any files at all".
+        return ([], []) if upload.file_count else (["<no files uploaded>"], [])
+
+    directory = incoming_dir(upload.id)
+    missing, short = [], []
+    for name, expected_size in manifest.items():
+        path = os.path.join(directory, name)
+        if not os.path.isfile(path):
+            missing.append(name)
+            continue
+        actual = os.path.getsize(path)
+        if actual != int(expected_size):
+            short.append({"name": name, "expected": int(expected_size), "actual": actual})
+    return missing, short
+
+
 def _assert_accepting(upload: StatementUpload) -> None:
     """Files may only be added while the upload is still being received."""
     if upload.status != UploadStatus.UPLOADED:
@@ -152,19 +186,48 @@ async def create_statement_upload(
     db.add(upload)
     db.flush()  # assigns upload.id for the storage path
 
-    try:
-        result = await stream_upload_to_dir(
-            request, incoming_dir(upload.id), max_files=MAX_UPLOAD_FILES
-        )
-    except UploadStreamError as exc:
-        db.rollback()
-        raise HTTPException(status_code=400, detail=f"Could not read upload: {exc}")
+    # Manifest-first create: the body is a JSON list of {name, size} and carries
+    # no files. POST /uploads is the only non-idempotent call in the protocol —
+    # a retried create mints a second upload and orphans the first — so it is
+    # kept to a zero-byte request that is over in milliseconds.
+    content_type = request.headers.get("content-type", "")
+    manifest = {}
+    if content_type.startswith("application/json"):
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Malformed manifest")
+        declared = (body or {}).get("files") or []
+        for entry in declared:
+            name = _safe_manifest_name(entry.get("name"))
+            if not name:
+                continue
+            manifest[name] = int(entry.get("size") or 0)
+        if len(manifest) != len(declared):
+            db.rollback()
+            raise HTTPException(
+                status_code=400,
+                detail="Duplicate filenames in manifest — files are stored by "
+                "name and would overwrite each other.",
+            )
+        result = {"written": [], "bytes": 0, "ignored_fields": []}
+    else:
+        try:
+            result = await stream_upload_to_dir(
+                request, incoming_dir(upload.id), max_files=MAX_UPLOAD_FILES
+            )
+        except UploadStreamError as exc:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=f"Could not read upload: {exc}")
 
-    if not result["written"] and finalize:
+    if not result["written"] and finalize and not manifest:
         db.rollback()
         raise HTTPException(status_code=400, detail="No files uploaded")
 
     stats = _record_files(upload, result["written"], result.get("ignored_fields"))
+    if manifest:
+        stats["manifest"] = manifest
+        stats["expected"] = len(manifest)
     # `receiving` keeps the ingest worker from starting while more batches are
     # still on the way — it would otherwise sort a half-delivered drop.
     stats["receiving"] = not finalize
@@ -184,6 +247,7 @@ async def create_statement_upload(
         "file_count": upload.file_count,
         "status": upload.status.value,
         "receiving": bool(upload.stats.get("receiving")),
+        "expected": len(manifest) or None,
     }
 
 
@@ -238,6 +302,24 @@ async def finalize_statement_upload(
     if not upload.file_count:
         raise HTTPException(status_code=400, detail="No files uploaded")
 
+    # The server decides whether the drop is complete. A client that just lost a
+    # batch is exactly the caller least able to make that judgement, and half a
+    # royalty period ingested as DONE is far worse than a refused finalize.
+    missing, short = _verify_manifest(upload)
+    if missing or short:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "incomplete_upload",
+                "expected": (upload.stats or {}).get("expected"),
+                "on_disk": upload.file_count,
+                "missing_count": len(missing),
+                "missing": missing[:200],
+                "short_count": len(short),
+                "short": short[:200],
+            },
+        )
+
     stats = dict(upload.stats or {})
     stats["receiving"] = False
     upload.stats = stats
@@ -277,6 +359,63 @@ async def revalidate_batch(
     }
 
 
+@statements_admin_router.get("/uploads")
+async def list_statement_uploads(
+    receiving: Optional[bool] = None,
+    limit: int = 50,
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_session),
+):
+    """Enumerate uploads, newest first.
+
+    Without this an admin who lost the upload id — which the UI used to drop on
+    every failure — had no way to see gigabytes sitting stranded on disk.
+    Pass receiving=true to list exactly the stuck ones.
+    """
+    q = db.query(StatementUpload).order_by(StatementUpload.id.desc())
+    rows = q.limit(max(1, min(limit, 200))).all()
+    out = []
+    for u in rows:
+        stats = u.stats or {}
+        is_receiving = bool(stats.get("receiving"))
+        if receiving is not None and is_receiving != receiving:
+            continue
+        out.append({
+            "upload_id": u.id,
+            "status": u.status.value,
+            "receiving": is_receiving,
+            "file_count": u.file_count,
+            "expected": stats.get("expected"),
+            "uploaded_at": u.uploaded_at.isoformat() if u.uploaded_at else None,
+            "last_batch_at": stats.get("last_batch_at"),
+            "error": stats.get("error"),
+        })
+    return {"items": out}
+
+
+@statements_admin_router.get("/uploads/{upload_id}/missing")
+async def upload_missing(
+    upload_id: int,
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_session),
+):
+    """What still has to be sent. This is what a resume re-sends."""
+    upload = db.get(StatementUpload, upload_id)
+    if upload is None:
+        raise HTTPException(status_code=404, detail="Upload not found")
+    stats = upload.stats or {}
+    missing, short = _verify_manifest(upload)
+    return {
+        "upload_id": upload.id,
+        "status": upload.status.value,
+        "receiving": bool(stats.get("receiving")),
+        "expected": stats.get("expected"),
+        "on_disk": upload.file_count,
+        "missing": missing,
+        "short": short,
+    }
+
+
 @statements_admin_router.get("/uploads/{upload_id}")
 async def get_statement_upload(
     upload_id: int,
@@ -297,6 +436,10 @@ async def get_statement_upload(
         "stage": upload.status.value,
         "file_count": upload.file_count,
         "uploaded_at": upload.uploaded_at.isoformat() if upload.uploaded_at else None,
+        # Top-level, not buried in stats: the UI polls these to tell a stuck
+        # upload from one that is merely mid-pipeline.
+        "receiving": bool((upload.stats or {}).get("receiving")),
+        "expected": (upload.stats or {}).get("expected"),
         "stats": upload.stats,
     }
 

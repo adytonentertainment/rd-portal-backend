@@ -46,6 +46,7 @@ class _PartWriter:
         self._headers: Dict[bytes, bytes] = {}
         self._handle = None
         self._current: Optional[str] = None
+        self._tmp: Optional[str] = None
 
     # --- parser callbacks (sync, called as bytes arrive) --------------------
 
@@ -55,6 +56,7 @@ class _PartWriter:
         self._header_value = b""
         self._handle = None
         self._current = None
+        self._tmp = None
 
     def on_header_field(self, data: bytes, start: int, end: int) -> None:
         self._header_field += data[start:end]
@@ -85,8 +87,18 @@ class _PartWriter:
                 f"Too many files (limit {self.max_files} per request)"
             )
         self._current = filename
-        # Written directly to its destination — nothing is buffered in memory.
-        self._handle = open(os.path.join(self.dest_dir, filename), "wb")
+        # Written to a sidecar and renamed only once the part completes.
+        #
+        # Writing straight to the final path looks harmless because a partial
+        # file is left out of stats["received_files"] — but the sorter reads the
+        # DIRECTORY (sorter.py: `sorted(os.listdir(src_dir))`), not that list. A
+        # client disconnecting mid-part would leave truncated bytes under the
+        # real filename, and the sorter would pair it, copy it into the canonical
+        # tree, create a Statement row for it, and then delete the good original.
+        # Statement validation is disabled, so nothing downstream catches it:
+        # the result is a silently wrong royalty figure.
+        self._tmp = os.path.join(self.dest_dir, f".{filename}.part")
+        self._handle = open(self._tmp, "wb")
 
     def on_part_data(self, data: bytes, start: int, end: int) -> None:
         if self._handle is not None:
@@ -99,18 +111,26 @@ class _PartWriter:
             self._handle.close()
             self._handle = None
             if self._current:
+                # Atomic within a filesystem: the file appears at its real name
+                # only when it is complete. Both paths are in dest_dir.
+                os.replace(self._tmp, os.path.join(self.dest_dir, self._current))
                 self.written.append(self._current)
         self._current = None
+        self._tmp = None
 
     def on_end(self) -> None:
         self.close()
 
     def close(self) -> None:
+        """Drop any part that never completed, so no truncated file survives."""
         if self._handle is not None:
             try:
                 self._handle.close()
             finally:
                 self._handle = None
+        if self._tmp and os.path.exists(self._tmp):
+            os.remove(self._tmp)
+        self._tmp = None
 
 
 async def stream_upload_to_dir(

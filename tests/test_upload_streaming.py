@@ -233,3 +233,167 @@ def test_abandoned_upload_is_failed_not_silently_ingested(client, session):
     session.refresh(upload)
     assert upload.status == UploadStatus.FAILED
     assert "abandoned" in upload.stats["error"].lower()
+
+
+def test_a_disconnect_leaves_no_truncated_file(tmp_path):
+    """The data-integrity guarantee: a part that never finished must not exist
+    under its real filename.
+
+    The sorter reads the DIRECTORY, not stats["received_files"], so a truncated
+    file would be paired, copied into the canonical tree, given a Statement row,
+    and its good original deleted — and with statement validation disabled,
+    nothing downstream would ever notice the wrong number.
+    """
+    from app.services.statement_ingest.upload_stream import (
+        UploadStreamError,
+        stream_upload_to_dir,
+    )
+
+    dest = str(tmp_path / "incoming")
+    body = (
+        b"--BOUND\r\n"
+        b'Content-Disposition: form-data; name="files"; filename="Good.xlsx"\r\n\r\n'
+        + b"A" * 500
+        + b"\r\n--BOUND\r\n"
+        b'Content-Disposition: form-data; name="files"; filename="Truncated.xlsx"\r\n\r\n'
+        + b"B" * 200  # part starts, body ends abruptly — no closing boundary
+    )
+
+    class _Dying:
+        headers = {"content-type": "multipart/form-data; boundary=BOUND"}
+
+        async def stream(self):
+            yield body
+            raise ConnectionError("client went away mid-part")
+
+    with pytest.raises(UploadStreamError):
+        asyncio.run(stream_upload_to_dir(_Dying(), dest, max_files=100))
+
+    on_disk = os.listdir(dest)
+    assert "Good.xlsx" in on_disk, "the completed file should survive"
+    assert "Truncated.xlsx" not in on_disk, (
+        "a truncated part must NOT appear under its real name — the sorter would "
+        f"ingest it as a valid statement. Found: {on_disk}"
+    )
+    assert not [f for f in on_disk if f.endswith(".part")], (
+        f"sidecar left behind: {on_disk}"
+    )
+
+
+def test_completed_files_are_never_left_as_sidecars(client, session):
+    """The rename must actually happen — otherwise nothing is ingested at all."""
+    r = client.post("/admin/statements/uploads", files=_files(4))
+    uid = r.json()["upload_id"]
+    on_disk = os.listdir(incoming_dir(uid))
+    assert len(on_disk) == 4
+    assert not [f for f in on_disk if f.startswith(".") or f.endswith(".part")]
+
+
+# --- server-verified completeness -------------------------------------------
+#
+# The client declares what it will send; the server refuses to release the
+# upload until every declared file is present at its declared size. A client
+# that just lost a batch must never be able to assert that a royalty period is
+# complete.
+
+def _manifest(names_sizes):
+    return {"files": [{"name": n, "size": s} for n, s in names_sizes]}
+
+
+def test_manifest_create_takes_no_files_and_is_cheap(client, session):
+    """POST /uploads is the only non-idempotent call; a retry of it mints a
+    duplicate upload. So it carries zero bytes."""
+    r = client.post(
+        "/admin/statements/uploads?finalize=false",
+        json=_manifest([("a.xlsx", 10), ("b.xlsx", 20)]),
+    )
+    assert r.status_code == 202, r.text
+    body = r.json()
+    assert body["file_count"] == 0
+    assert body["receiving"] is True
+    assert body["expected"] == 2
+
+
+def test_finalize_refuses_an_incomplete_drop(client, session):
+    """The core guarantee. 4 declared, 2 sent -> finalize must NOT release it."""
+    declared = [(f"Ben_PUB26H1_C{i:05d}_W{i} (YouTube Publishing).xlsx", 2048) for i in range(4)]
+    r = client.post("/admin/statements/uploads?finalize=false", json=_manifest(declared))
+    uid = r.json()["upload_id"]
+
+    client.post(f"/admin/statements/uploads/{uid}/files", files=_files(2))
+
+    r2 = client.post(f"/admin/statements/uploads/{uid}/finalize")
+    assert r2.status_code == 409, "an incomplete period must not be releasable"
+    detail = r2.json()["detail"]
+    assert detail["error"] == "incomplete_upload"
+    assert detail["missing_count"] == 4
+
+    upload = session.get(StatementUpload, uid)
+    session.refresh(upload)
+    assert upload.stats["receiving"] is True, "upload must stay closed to the worker"
+
+
+def test_finalize_refuses_a_truncated_file(client, session):
+    """A file that arrived the wrong size is the dangerous case: it looks valid
+    on disk, and statement validation is disabled downstream."""
+    name = "Ben_PUB26H1_C00000_Writer 0 (YouTube Publishing).xlsx"
+    r = client.post("/admin/statements/uploads?finalize=false",
+                    json=_manifest([(name, 2048)]))
+    uid = r.json()["upload_id"]
+    client.post(f"/admin/statements/uploads/{uid}/files", files=_files(1))
+
+    # simulate a file that landed short of its declared size
+    with open(os.path.join(incoming_dir(uid), name), "wb") as fh:
+        fh.write(b"x" * 100)
+
+    r2 = client.post(f"/admin/statements/uploads/{uid}/finalize")
+    assert r2.status_code == 409
+    short = r2.json()["detail"]["short"]
+    assert short and short[0]["name"] == name
+    assert short[0]["expected"] == 2048 and short[0]["actual"] == 100
+
+
+def test_finalize_accepts_a_complete_drop(client, session):
+    declared = [(f"Ben_PUB26H1_C{i:05d}_Writer {i} (YouTube Publishing).xlsx", 2048)
+                for i in range(3)]
+    r = client.post("/admin/statements/uploads?finalize=false", json=_manifest(declared))
+    uid = r.json()["upload_id"]
+    client.post(f"/admin/statements/uploads/{uid}/files", files=_files(3))
+
+    r2 = client.post(f"/admin/statements/uploads/{uid}/finalize")
+    assert r2.status_code == 202, r2.text
+    upload = session.get(StatementUpload, uid)
+    session.refresh(upload)
+    assert upload.stats["receiving"] is False
+
+
+def test_missing_endpoint_drives_resume(client, session):
+    declared = [(f"Ben_PUB26H1_C{i:05d}_Writer {i} (YouTube Publishing).xlsx", 2048)
+                for i in range(5)]
+    r = client.post("/admin/statements/uploads?finalize=false", json=_manifest(declared))
+    uid = r.json()["upload_id"]
+    client.post(f"/admin/statements/uploads/{uid}/files", files=_files(2))
+
+    m = client.get(f"/admin/statements/uploads/{uid}/missing").json()
+    assert m["expected"] == 5 and m["on_disk"] == 2
+    assert len(m["missing"]) == 3
+
+    # resuming sends only what is missing, then finalize succeeds
+    rest = [("files", (n, b"x" * 2048)) for n, _ in declared[2:]]
+    client.post(f"/admin/statements/uploads/{uid}/files", files=rest)
+    assert client.post(f"/admin/statements/uploads/{uid}/finalize").status_code == 202
+
+
+def test_stuck_uploads_are_discoverable(client, session):
+    """An admin who lost the upload id must still be able to find it."""
+    client.post("/admin/statements/uploads?finalize=false",
+                json=_manifest([("a.xlsx", 1)]))
+    rows = client.get("/admin/statements/uploads", params={"receiving": True}).json()["items"]
+    assert rows and rows[0]["receiving"] is True
+    assert rows[0]["expected"] == 1
+
+
+def test_duplicate_names_in_manifest_are_rejected(client, session):
+    r = client.post("/admin/statements/uploads?finalize=false",
+                    json=_manifest([("same.xlsx", 1), ("same.xlsx", 2)]))
+    assert r.status_code == 400

@@ -28,6 +28,8 @@ from app.models.statements import (
     Statement,
     StatementBatch,
     Writer,
+    StatementUpload,
+    UploadStatus,
 )
 
 from .gate import compute_gate
@@ -89,9 +91,34 @@ def _distributable_statements(db: Session, batch_id: int):
     return out
 
 
+def assert_no_ingest_in_flight(db: Session) -> None:
+    """Refuse to publish while any upload is still being ingested.
+
+    A statement's numbers exist only after its parse completes, and a period's
+    completeness exists only after the whole upload does. Distributing mid-ingest
+    would push partial figures to writer portals — real people reading real
+    royalty pages — and the next parse commit would silently change what they
+    just saw. Every publish path funnels through here, so no route can skip it.
+    """
+    in_flight = (
+        db.query(StatementUpload)
+        .filter(StatementUpload.status.notin_((UploadStatus.DONE, UploadStatus.FAILED)))
+        .count()
+    )
+    if in_flight:
+        raise GateNotReady({
+            "ready": False,
+            "reasons": [
+                f"{in_flight} upload(s) still ingesting — sending is blocked "
+                "until ingest finishes."
+            ],
+        })
+
+
 def distribute_batch(
     db: Session, batch_id: int, published_by: Optional[int] = None
 ) -> dict:
+    assert_no_ingest_in_flight(db)
     gate = compute_gate(db, batch_id)
     if not gate["ready"]:
         raise GateNotReady(gate)

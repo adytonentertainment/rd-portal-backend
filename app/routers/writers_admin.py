@@ -737,6 +737,15 @@ async def distribute_all(
             "confirm sending to proceed anyway.",
         )
 
+    # Never send while an upload is still ingesting: numbers exist only after
+    # parse, so a mid-ingest send pushes partial figures to writer portals.
+    from app.services.distribution.publish import assert_no_ingest_in_flight
+
+    try:
+        assert_no_ingest_in_flight(db)
+    except GateNotReady as e:
+        raise HTTPException(status_code=409, detail=(e.gate or {}).get("reasons", ["Ingest in progress"])[0])
+
     # Final safety: never distribute while the ingestion audit shows the DB out
     # of sync with the source files (misattributed accounts = wrong writer paid).
     from app.services.statement_ingest.reconcile import reconcile_ingestion

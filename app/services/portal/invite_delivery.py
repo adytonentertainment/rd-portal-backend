@@ -24,7 +24,7 @@ from urllib.parse import urljoin
 from app.database.database import SessionLocal
 from app.emails.emails import EMail
 from app.logger.logger import get_logger
-from app.models.statements import PortalInvite, Writer
+from app.models.statements import Contact, PortalInvite, Publisher, Writer
 from app.settings import get_settings
 
 logger = get_logger("portal_invites")
@@ -55,12 +55,32 @@ def send_invite_email(invite_id: int, raw_token: str) -> bool:
         writer = db.get(Writer, invite.writer_id)
         writer_name = writer.canonical_name if writer else "your catalog"
 
+        # Name the actual publisher, not the software. This mail arrives cold
+        # and asks the reader to click through to their earnings; the one thing
+        # that makes it credible is the name they already do business with.
+        publisher = db.get(Publisher, writer.publisher_id) if writer else None
+        sender = publisher.name if publisher else None
+
+        # The recipient's own preference wins over the writer's: one contact
+        # (a manager, an attorney) can represent several writers, and it is the
+        # reader who has to understand the mail, not the catalog.
+        contact = (
+            db.query(Contact).filter(Contact.email == invite.email).first()
+        )
+        language = (
+            (contact.preferred_language if contact else None)
+            or (writer.preferred_language if writer else None)
+            or "en"
+        )
+
         try:
             EMail().send_portal_invite_email(
                 recipient_email=invite.email,
                 writer_name=writer_name,
                 accept_url=invite_url(raw_token),
                 expires_at=invite.expires_at,
+                invited_by=sender,
+                language=language,
             )
         except Exception as exc:
             # Keep the reason, drop anything token-shaped: the message can

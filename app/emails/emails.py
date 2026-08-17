@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formatdate
@@ -192,6 +193,17 @@ class EMail:
                             )
             self.send_email(user.email, user.username, title, html)
 
+    # Month names for the expiry date. strftime("%B") follows the server's C
+    # locale, which is English on every host we deploy to, so a Spanish email
+    # would read "expires on August 31" — the one line that has to be
+    # unambiguous, because after that date the link stops working.
+    _MONTHS = {
+        "en": ["January", "February", "March", "April", "May", "June", "July",
+               "August", "September", "October", "November", "December"],
+        "es": ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
+               "agosto", "septiembre", "octubre", "noviembre", "diciembre"],
+    }
+
     def send_portal_invite_email(
         self,
         recipient_email: str,
@@ -199,36 +211,88 @@ class EMail:
         accept_url: str,
         expires_at=None,
         invited_by: str = None,
+        language: str = "en",
     ):
         """Invite one email address to a writer's royalty portal.
 
         Deliberately plain: writers get this cold, and a link to sign in and
-        view money reads as phishing if it is dressed up. It names who sent it,
-        which catalog it is for, and when it stops working."""
-        who = f" by {invited_by}" if invited_by else ""
+        view money reads as phishing if it is dressed up. It names the sender,
+        the catalog it is for, and when it stops working.
+
+        Written in the recipient's language. Roughly a third of this roster is
+        Spanish-speaking, and an English-only email asking someone to click
+        through to their earnings is the kind of thing people correctly delete.
+        Unknown or unsupported codes fall back to English rather than failing —
+        an invite in the wrong language still beats no invite.
+        """
+        lang = (language or "en").lower()[:2]
+        if lang not in ("en", "es"):
+            lang = "en"
+
+        sender = invited_by or self.from_name
+
         expiry = ""
         if expires_at is not None:
-            expiry = (
-                f"<br><br>This link expires on "
-                f"{expires_at.strftime('%B %-d, %Y')} and can only be used once."
+            month = self._MONTHS[lang][expires_at.month - 1]
+            when = (
+                f"{month} {expires_at.day}, {expires_at.year}"
+                if lang == "en"
+                else f"{expires_at.day} de {month} de {expires_at.year}"
             )
-        message = (
-            f"You have been invited{who} to access the royalty portal for "
-            f"<b>{writer_name}</b>.<br><br>"
-            f"There you can see your statements, earnings by song and territory, "
-            f"and download the underlying documents."
-            f"{expiry}"
-        )
-        title = f"Your royalty portal for {writer_name}"
+            expiry = (
+                f"<br><br>This link expires on {when} and can only be used once."
+                if lang == "en"
+                else f"<br><br>Este enlace vence el {when} y solo puede usarse una vez."
+            )
+
+        if lang == "es":
+            title = f"Su portal de regalías para {writer_name} — {sender}"
+            message = (
+                f"{sender} le invita a acceder al portal de regalías de "
+                f"<b>{writer_name}</b>.<br><br>"
+                f"Allí puede consultar sus estados de cuenta, los ingresos por "
+                f"canción y territorio, y descargar los documentos "
+                f"correspondientes.{expiry}<br><br>"
+                f"Si no esperaba este mensaje, puede ignorarlo."
+            )
+            button = "Abrir su portal"
+        else:
+            title = f"Your royalty portal for {writer_name} — {sender}"
+            message = (
+                f"{sender} has invited you to access the royalty portal for "
+                f"<b>{writer_name}</b>.<br><br>"
+                f"There you can see your statements, earnings by song and "
+                f"territory, and download the underlying documents.{expiry}<br><br>"
+                f"If you were not expecting this email, you can ignore it."
+            )
+            button = "Open your portal"
 
         with open(self.template_path) as f:
             template = self.jinja.from_string(f.read())
+            # Brand the mail as the PUBLISHER, not as the software. The
+            # recipient has a relationship with Regalias Digitales, not with
+            # Verax; a VERAX wordmark over "your Verax Team" on a mail about
+            # their royalties is the thing that gets it reported as phishing.
+            year = expires_at.year if expires_at is not None else datetime.now().year
             html = template.render(
                 title=title,
                 message=message,
-                button="Open your portal",
+                button=button,
                 button_url=accept_url,
                 base_url=settings.base_url_frontend,
+                brand_name=sender.upper(),
+                # No vendor social link on a publisher's mail. Other templates
+                # that omit this keep the existing default.
+                social_url="",
+                signoff="Kind regards," if lang == "en" else "Atentamente,",
+                signoff_name=(
+                    f"the {sender} team" if lang == "en" else f"el equipo de {sender}"
+                ),
+                footer_text=(
+                    f"Copyright &copy; {year} {sender}. All rights reserved."
+                    if lang == "en"
+                    else f"Copyright &copy; {year} {sender}. Todos los derechos reservados."
+                ),
             )
             # The recipient has no account yet, so there is no username to
             # address them by — the mailbox itself is the name we know.

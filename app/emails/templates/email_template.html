@@ -143,7 +143,7 @@
                                                 "
                                             >
                                                 <!-- Logo -->
-                                                <span style="font-size:28px; font-weight:700; color:#2c2c2c; letter-spacing:-0.02em;">VERAX</span>
+                                                <span style="font-size:28px; font-weight:700; color:#2c2c2c; letter-spacing:-0.02em;">{{ brand_name|default("VERAX") }}</span>
                                             </td>
                                         </tr>
                                     </table>
@@ -238,15 +238,12 @@
                                                                             0;
                                                                     "
                                                                 >
-                                                                    Kind
-                                                                    regards,<br />
+                                                                    {{ signoff|default("Kind regards,") }}<br />
                                                                     <strong
                                                                         style="
                                                                             color: #2c2c2c;
                                                                         "
-                                                                        >your
-                                                                        Verax
-                                                                        Team</strong
+                                                                        >{{ signoff_name|default("your Verax Team") }}</strong
                                                                     >
                                                                 </p>
                                                             </div>
@@ -409,8 +406,9 @@
                                                                     text-align: center;
                                                                 "
                                                             >
-                                                                <a
-                                                                    href="https://www.instagram.com/verax.app/"
+                                                                {% set _social = social_url|default('https://www.instagram.com/verax.app/') %}
+                                                                {% if _social %}<a
+                                                                    href="{{ _social }}"
                                                                     target="_blank"
                                                                     style="
                                                                         color: #5bc0f8;
@@ -419,8 +417,8 @@
                                                                         margin: 0
                                                                             8px;
                                                                     "
-                                                                    >Instagram</a
-                                                                >
+                                                                    >{{ social_label|default('Instagram') }}</a
+                                                                >{% endif %}
                                                             </div>
                                                         </td>
                                                     </tr>
@@ -445,11 +443,7 @@
                                                                 "
                                                             >
                                                                 <em
-                                                                    >Copyright
-                                                                    &copy; 2026
-                                                                    Verax UG,
-                                                                    All rights
-                                                                    reserved.</em
+                                                                    >{{ footer_text|default("Copyright &copy; 2026 Verax UG, All rights reserved.") }}</em
                                                                 >
                                                             </div>
                                                         </td>

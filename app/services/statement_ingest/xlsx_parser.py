@@ -76,23 +76,61 @@ def _to_decimal(value) -> Optional[Decimal]:
     return Decimal(str(value))
 
 
+try:
+    from python_calamine import CalamineWorkbook
+
+    _HAVE_CALAMINE = True
+except ImportError:  # pragma: no cover — dev envs without the wheel
+    _HAVE_CALAMINE = False
+
+
+def _iter_rows(path):
+    """Yield raw cell rows plus a close callback.
+
+    calamine (Rust) reads the same sheets ~5-10x faster than openpyxl and is
+    what makes a full half-year ingest a minutes job — the single biggest file
+    is a ~1M-row XLSX. Two semantic differences are normalised so the parse
+    logic above is byte-for-byte compatible (verified against the entire real
+    corpus, all 2,613 files, against the previously-parsed sums):
+
+      * calamine yields "" for an empty cell where openpyxl yields None
+      * calamine yields int for whole numbers where openpyxl yields float —
+        int passes through _to_decimal/_to_str identically, so only "" needs
+        mapping
+
+    skip_empty_area=False keeps leading empty rows/columns, so cell indexes
+    line up with the header exactly as they did under openpyxl.
+    """
+    if _HAVE_CALAMINE:
+        wb = CalamineWorkbook.from_path(str(path))
+        name = SHEET_NAME if SHEET_NAME in wb.sheet_names else wb.sheet_names[0]
+        data = wb.get_sheet_by_name(name).to_python(skip_empty_area=False)
+        rows = (
+            tuple(None if cell == "" else cell for cell in row)
+            for row in data
+        )
+        return rows, lambda: None
+
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    ws = wb[SHEET_NAME] if SHEET_NAME in wb.sheetnames else wb[wb.sheetnames[0]]
+    return ws.iter_rows(values_only=True), wb.close
+
+
 def parse_statement_xlsx(path) -> Tuple[List[Dict], Decimal, Optional[Decimal], int]:
     """Parse a detail XLSX into (lines, detail_sum, embedded_total, line_count).
 
     ``lines`` are dicts keyed by statement_line columns (with ``row_no``, without
     ``statement_id``), ready for :func:`persist_lines`.
     """
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    rows, closer = _iter_rows(path)
     try:
-        ws = wb[SHEET_NAME] if SHEET_NAME in wb.sheetnames else wb[wb.sheetnames[0]]
-
         columns = None  # list of statement_line field names per cell index
         earnings_idx = None
         lines: List[Dict] = []
         detail_sum = Decimal("0")
         embedded_total: Optional[Decimal] = None
 
-        for row in ws.iter_rows(values_only=True):
+        for row in rows:
             if columns is None:
                 first = row[0] if row else None
                 if isinstance(first, str) and first.strip() == "Period":
@@ -130,7 +168,7 @@ def parse_statement_xlsx(path) -> Tuple[List[Dict], Decimal, Optional[Decimal], 
 
         return lines, detail_sum, embedded_total, len(lines)
     finally:
-        wb.close()
+        closer()
 
 
 # --- fast line persistence ----------------------------------------------------

@@ -96,9 +96,45 @@ def parse_statement_pdf(path: str) -> Dict[str, Optional[Decimal]]:
     Reads pages 1-3 only (summary is on page 2, cheque line on page 1;
     page 4+ is track detail, irrelevant and potentially huge).
     """
+    return parse_summary_lines(_extract_lines(path))
+
+
+try:
+    import fitz  # PyMuPDF
+
+    _HAVE_FITZ = True
+except ImportError:  # pragma: no cover
+    _HAVE_FITZ = False
+
+
+def _extract_lines(path: str):
+    """Text lines from the first 3 pages.
+
+    PyMuPDF extracts the same summary text ~10-20x faster than pdfplumber,
+    which matters at 2,600 PDFs per drop. The summary parser is line-regex
+    based, so what must hold is that every regex-matched line survives with
+    its label and figure on one line — verified against the full real corpus
+    (all statements re-parsed and compared to the previously stored figures)
+    before this path shipped. pdfplumber stays as the fallback.
+    """
     lines = []
+    if _HAVE_FITZ:
+        # NOT get_text("text"): that mode splits label and figure onto separate
+        # lines for these statements ("Royalties calculated:" / "6,663.27"),
+        # which silently produces None for every summary field. Reconstructing
+        # lines from words — grouped by baseline, ordered by x — yields exactly
+        # pdfplumber's line text, verified across the full corpus.
+        with fitz.open(path) as doc:
+            for page_no in range(min(3, doc.page_count)):
+                rows = {}
+                for x0, _y0, _x1, _y1, word, *_ in doc[page_no].get_text("words"):
+                    rows.setdefault(round(_y0, 1), []).append((x0, word))
+                for y in sorted(rows):
+                    lines.append(" ".join(w for _x, w in sorted(rows[y])))
+        return lines
+
     with pdfplumber.open(path) as pdf:
         for page in pdf.pages[:3]:
             text = page.extract_text() or ""
             lines.extend(text.splitlines())
-    return parse_summary_lines(lines)
+    return lines

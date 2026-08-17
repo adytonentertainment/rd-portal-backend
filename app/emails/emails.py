@@ -94,6 +94,27 @@ class EMail:
                 print(f"✓ Email sent to {receiver_email} via {provider.name}")
                 return
 
+            # Fail with the CAUSE, not a symptom. With no SMTP host configured
+            # this used to call SMTP("") and surface "[Errno -2] Name or service
+            # not known" — a DNS error that reads like a network fault and sends
+            # you looking in the wrong place. Unset config is not a network fault.
+            missing = [
+                name
+                for name, value in (
+                    ("EMAIL_SERVER", self.server),
+                    ("EMAIL_PORT", self.port),
+                    ("EMAIL_USERNAME", self.email),
+                    ("EMAIL_PASSWORD", self.password),
+                )
+                if not value
+            ]
+            if missing:
+                raise RuntimeError(
+                    "email is not configured: " + ", ".join(missing) + " unset. "
+                    "No provider is configured either, so there is no way to send. "
+                    "The invite itself is still valid — copy its link from the UI."
+                )
+
             session = SMTP(self.server, self.port)
             session.connect(self.server, self.port)
             session.starttls()

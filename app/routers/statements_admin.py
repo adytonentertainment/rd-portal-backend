@@ -299,13 +299,13 @@ async def finalize_statement_upload(
     if upload is None:
         raise HTTPException(status_code=404, detail="Upload not found")
     _assert_accepting(upload)
-    if not upload.file_count:
-        raise HTTPException(status_code=400, detail="No files uploaded")
 
     # The server decides whether the drop is complete. A client that just lost a
     # batch is exactly the caller least able to make that judgement, and half a
     # royalty period ingested as DONE is far worse than a refused finalize.
     missing, short = _verify_manifest(upload)
+    if not upload.file_count and not missing and not short:
+        raise HTTPException(status_code=400, detail="No files uploaded")
     if missing or short:
         raise HTTPException(
             status_code=409,

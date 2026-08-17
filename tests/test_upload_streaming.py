@@ -397,3 +397,14 @@ def test_duplicate_names_in_manifest_are_rejected(client, session):
     r = client.post("/admin/statements/uploads?finalize=false",
                     json=_manifest([("same.xlsx", 1), ("same.xlsx", 2)]))
     assert r.status_code == 400
+
+
+def test_zero_files_against_a_manifest_reports_what_is_missing(client, session):
+    """A drop where nothing arrived must still say WHAT is missing — the generic
+    "No files uploaded" gave the caller nothing to resume from."""
+    r = client.post("/admin/statements/uploads?finalize=false",
+                    json=_manifest([("a.xlsx", 10), ("b.xlsx", 20)]))
+    uid = r.json()["upload_id"]
+    r2 = client.post(f"/admin/statements/uploads/{uid}/finalize")
+    assert r2.status_code == 409
+    assert r2.json()["detail"]["missing_count"] == 2

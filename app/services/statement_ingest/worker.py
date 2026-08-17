@@ -289,6 +289,71 @@ def _parse_files(paths: Tuple[Optional[str], Optional[str]]) -> Dict:
     return res
 
 
+# --- child-persist parse path -------------------------------------------------
+#
+# With the parsers fast (calamine + PyMuPDF) the old fan-out became the
+# bottleneck itself: children parsed, then PICKLED every line back to the
+# parent — hundreds of MB through a pipe for the biggest statement — and the
+# parent ran every COPY and commit serially. Under child-persist each worker
+# process opens its own database connection, COPYs its statement's lines
+# directly, updates the statement row and commits. Only counters cross the
+# process boundary, inserts run in parallel, and durability improves to
+# per-statement (a killed worker loses only statements mid-flight).
+#
+# Gated to Postgres: SQLite does not take concurrent writers, so dev/tests keep
+# the in-parent path. INGEST_CHILD_PERSIST=0 forces the old path anywhere.
+
+_CHILD_ENGINE = None
+_CHILD_SESSION = None
+
+
+def _child_session(db_url: str):
+    """One engine per worker process, one pooled connection, lazily built.
+    The parent's engine must never be reused across fork — connections are not
+    fork-safe — so the child builds its own from the URL string."""
+    global _CHILD_ENGINE, _CHILD_SESSION
+    if _CHILD_ENGINE is None:
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        _CHILD_ENGINE = create_engine(db_url, pool_size=1, max_overflow=0, pool_pre_ping=True)
+        _CHILD_SESSION = sessionmaker(bind=_CHILD_ENGINE, autocommit=False, autoflush=False)
+    return _CHILD_SESSION()
+
+
+def _parse_and_persist(statement_id: int, paths, db_url: str):
+    """Runs IN a worker process: parse both halves, COPY the lines, write the
+    summary fields, commit. Returns (statement_id, line_count, error|None)."""
+    session = _child_session(db_url)
+    try:
+        statement = session.get(Statement, statement_id)
+        if statement is None or statement.parse_status != ParseStatus.PENDING:
+            return statement_id, 0, None  # already handled elsewhere
+        try:
+            res = _parse_files(paths)
+        except Exception as exc:
+            statement.parse_status = ParseStatus.FAILED
+            statement.parse_error = str(exc)[:1000]
+            session.commit()
+            return statement_id, 0, str(exc)
+        _persist_parsed(statement, res, session)
+        session.commit()
+        return statement_id, res.get("line_count") or 0, None
+    except Exception as exc:
+        session.rollback()
+        try:
+            st = session.get(Statement, statement_id)
+            if st is not None and st.parse_status == ParseStatus.PENDING:
+                st.parse_status = ParseStatus.FAILED
+                st.parse_error = f"persist: {exc}"[:1000]
+                session.commit()
+        except Exception:
+            session.rollback()
+        return statement_id, 0, str(exc)
+    finally:
+        session.close()
+
+
 def _persist_parsed(statement: Statement, res: Dict, session: Session) -> None:
     """Write a parse result to the DB (main process only)."""
     if res["lines"] is not None:
@@ -400,7 +465,61 @@ def _run_parse_stage(upload_id: int, session: Session) -> None:
             since_commit = 0
 
     use_parallel = _PARSE_WORKERS > 1 and len(pending_ids) >= _PARALLEL_MIN_FILES
-    if use_parallel:
+    child_persist = (
+        use_parallel
+        and session.get_bind().dialect.name == "postgresql"
+        and os.getenv("INGEST_CHILD_PERSIST", "1") != "0"
+    )
+    if child_persist:
+        paths = {
+            sid: (xp, pp)
+            for sid, xp, pp in session.query(
+                Statement.id, Statement.xlsx_path, Statement.pdf_path
+            ).filter(Statement.id.in_(pending_ids))
+        }
+        db_url = session.get_bind().engine.url.render_as_string(hide_password=False)
+        done = 0
+        try:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=_PARSE_WORKERS) as ex:
+                futs = {
+                    ex.submit(_parse_and_persist, sid, paths[sid], db_url): sid
+                    for sid in pending_ids
+                }
+                for fut in concurrent.futures.as_completed(futs):
+                    sid = futs[fut]
+                    try:
+                        _sid, _count, err = fut.result()
+                        if err:
+                            logger.warning(f"Statement {sid} failed in worker: {err[:200]}")
+                    except Exception as exc:
+                        # The child process died outright — record it here.
+                        st = session.get(Statement, sid)
+                        if st is not None and st.parse_status == ParseStatus.PENDING:
+                            st.parse_status = ParseStatus.FAILED
+                            st.parse_error = f"worker crashed: {exc}"[:1000]
+                            session.commit()
+                    done += 1
+                    if done % 50 == 0:
+                        # Children own the rows; the parent just refreshes the
+                        # visible counters and heartbeats its lease.
+                        session.expire_all()
+                        upload = session.get(StatementUpload, upload_id)
+                        _refresh_parse_counters(upload, session)
+                        upload.claimed_at = datetime.now()
+                        session.commit()
+        except Exception:
+            logger.exception("Child-persist pool failed; remaining statements go serial")
+            session.expire_all()
+            for sid in pending_ids:
+                statement = session.get(Statement, sid)
+                if statement is None or statement.parse_status != ParseStatus.PENDING:
+                    continue
+                try:
+                    _apply(sid, result=_parse_files((statement.xlsx_path, statement.pdf_path)))
+                except Exception as exc:
+                    _apply(sid, error=exc)
+        session.expire_all()
+    elif use_parallel:
         # Read the file paths up front so worker processes get plain strings
         # (no ORM/session crosses the process boundary).
         paths = {

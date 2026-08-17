@@ -316,7 +316,12 @@ def _parse_one_statement(statement: Statement, session: Session) -> None:
 # each parse, so one corrupt file rolls back only its own partial line inserts —
 # not the whole batch. Crash-resumable: an uncommitted statement is still
 # PENDING on restart and gets reparsed (parsing deletes prior lines first).
-PARSE_COMMIT_BATCH = 50
+# How often parse progress is written back. This is a crash-recovery interval,
+# not a performance knob: nothing is durable until a commit, so on a host where
+# the process can be killed mid-stage (an OOM on a small instance) a large batch
+# means every restart begins from zero and dies at the same point — an infinite
+# loop that never records a single parsed statement. Lower it there.
+PARSE_COMMIT_BATCH = max(1, int(os.getenv("INGEST_PARSE_COMMIT_BATCH", "50")))
 
 
 def _run_parse_stage(upload_id: int, session: Session) -> None:

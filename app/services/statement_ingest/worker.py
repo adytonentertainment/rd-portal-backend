@@ -337,6 +337,13 @@ def _parse_and_persist(statement_id: int, paths, db_url: str):
             session.commit()
             return statement_id, 0, str(exc)
         _persist_parsed(statement, res, session)
+        # _persist_parsed writes the data but not the verdict — marking PARSED
+        # lived only in the serial path's _apply. Without this line children
+        # write every royalty line and the statement stays PENDING forever:
+        # counters read 0, gates see nothing distributable, and a restart
+        # re-parses the entire drop from scratch.
+        statement.parse_status = ParseStatus.PARSED
+        statement.parse_error = None
         session.commit()
         return statement_id, res.get("line_count") or 0, None
     except Exception as exc:

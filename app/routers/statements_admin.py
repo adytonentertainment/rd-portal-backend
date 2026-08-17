@@ -276,6 +276,14 @@ async def add_statement_upload_files(
     except UploadStreamError as exc:
         raise HTTPException(status_code=400, detail=f"Could not read upload: {exc}")
 
+    # Re-fetch WITH the row lock only now, after the body is fully on disk.
+    # Two clients can legitimately send batches for the same upload at once
+    # (a retry plus a second tab, or an admin script resuming) — without the
+    # lock their read-modify-write on stats lost updates, and file_count
+    # reported 2,639 while 5,224 files sat on disk. Locking before the stream
+    # would be worse: it serializes every concurrent batch behind a
+    # minutes-long body read. The critical section is just this merge.
+    upload = db.get(StatementUpload, upload_id, with_for_update=True)
     stats = _record_files(upload, result["written"], result.get("ignored_fields"))
     stats["receiving"] = True
     upload.stats = dict(stats)
@@ -380,6 +388,8 @@ async def list_statement_uploads(
         is_receiving = bool(stats.get("receiving"))
         if receiving is not None and is_receiving != receiving:
             continue
+        sort = stats.get("sort") or {}
+        parse = stats.get("parse") or {}
         out.append({
             "upload_id": u.id,
             "status": u.status.value,
@@ -389,6 +399,15 @@ async def list_statement_uploads(
             "uploaded_at": u.uploaded_at.isoformat() if u.uploaded_at else None,
             "last_batch_at": stats.get("last_batch_at"),
             "error": stats.get("error"),
+            # Compact pipeline progress, enough for a status panel without
+            # shipping the full stats blob (received_files can be 5,000 names).
+            "progress": {
+                "sorted": sort.get("statements"),
+                "batches": sort.get("batches"),
+                "parsed": parse.get("parsed"),
+                "parse_total": parse.get("total"),
+                "parse_failed": parse.get("failed"),
+            },
         })
     return {"items": out}
 

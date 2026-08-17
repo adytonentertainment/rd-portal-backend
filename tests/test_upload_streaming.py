@@ -408,3 +408,24 @@ def test_zero_files_against_a_manifest_reports_what_is_missing(client, session):
     r2 = client.post(f"/admin/statements/uploads/{uid}/finalize")
     assert r2.status_code == 409
     assert r2.json()["detail"]["missing_count"] == 2
+
+
+def test_upload_list_carries_pipeline_progress(client, session):
+    """The activity panel renders from the LIST endpoint alone — it must carry
+    compact sort/parse progress, not force a per-upload fetch of the full
+    stats blob (received_files can be 5,000 names)."""
+    r = client.post("/admin/statements/uploads", files=_files(2))
+    uid = r.json()["upload_id"]
+    upload = session.get(StatementUpload, uid)
+    stats = dict(upload.stats or {})
+    stats["sort"] = {"statements": 2, "batches": 1}
+    stats["parse"] = {"parsed": 1, "total": 2, "failed": 0}
+    upload.stats = stats
+    session.commit()
+
+    rows = client.get("/admin/statements/uploads").json()["items"]
+    row = next(x for x in rows if x["upload_id"] == uid)
+    assert row["progress"] == {
+        "sorted": 2, "batches": 1, "parsed": 1, "parse_total": 2, "parse_failed": 0,
+    }
+    assert "received_files" not in str(row), "full stats blob must not leak into the list"

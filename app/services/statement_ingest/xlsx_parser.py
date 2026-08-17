@@ -133,11 +133,93 @@ def parse_statement_xlsx(path) -> Tuple[List[Dict], Decimal, Optional[Decimal], 
         wb.close()
 
 
+# --- fast line persistence ----------------------------------------------------
+#
+# statement_line is the volume table: a full half-year drop inserts ~6.7 million
+# rows, and the single biggest statement carries ~1M lines on its own. Row-wise
+# INSERTs (bulk_insert_mappings -> executemany) are what made ingest take hours
+# on Postgres; COPY streams the same rows in one protocol exchange and is
+# typically 5-10x faster on exactly the statements that dominate the run.
+#
+# COPY text format is used (not csv): tab-delimited, backslash-escaped, with \N
+# for NULL. It is the only format where NULL vs empty-string is unambiguous —
+# and these are royalty figures, so "no value" and "zero-length text" must never
+# be conflated by the transport.
+
+def _copy_encode(value) -> str:
+    """One value -> COPY text-format field."""
+    if value is None:
+        return "\\N"
+    text = str(value)
+    if "\\" in text:
+        text = text.replace("\\", "\\\\")
+    if "\t" in text:
+        text = text.replace("\t", "\\t")
+    if "\n" in text:
+        text = text.replace("\n", "\\n")
+    if "\r" in text:
+        text = text.replace("\r", "\\r")
+    return text
+
+
+class _RowStream:
+    """File-like reader over encoded rows, so COPY streams instead of holding
+    a ~200 MB payload for the biggest statement in memory."""
+
+    def __init__(self, chunks):
+        self._chunks = chunks
+        self._buffer = b""
+
+    def read(self, size=-1) -> bytes:
+        while size < 0 or len(self._buffer) < size:
+            try:
+                self._buffer += next(self._chunks)
+            except StopIteration:
+                break
+        if size < 0:
+            out, self._buffer = self._buffer, b""
+            return out
+        out, self._buffer = self._buffer[:size], self._buffer[size:]
+        return out
+
+    # psycopg2 probes readline on some paths; read() is what it uses for COPY.
+    def readline(self):  # pragma: no cover
+        return self.read(8192)
+
+
 def persist_lines(statement_id: int, lines: List[Dict], session) -> int:
-    """Bulk-insert parsed lines for a statement. Flushes, does not commit."""
-    session.bulk_insert_mappings(
-        StatementLine,
-        [dict(line, statement_id=statement_id) for line in lines],
-    )
+    """Insert parsed lines for a statement. Flushes/joins the session's
+    transaction, does not commit — the worker owns commit cadence."""
+    if session.get_bind().dialect.name != "postgresql":
+        # SQLite (dev, tests): COPY does not exist; the original path stays.
+        session.bulk_insert_mappings(
+            StatementLine,
+            [dict(line, statement_id=statement_id) for line in lines],
+        )
+        session.flush()
+        return len(lines)
+
+    cols = [c.name for c in StatementLine.__table__.columns if c.name != "id"]
+
+    def chunks():
+        buf, size = [], 0
+        for line in lines:
+            row = dict(line, statement_id=statement_id)
+            buf.append("\t".join(_copy_encode(row.get(c)) for c in cols) + "\n")
+            size += len(buf[-1])
+            if size >= 1_000_000:  # ~1 MB per network write
+                yield "".join(buf).encode("utf-8")
+                buf, size = [], 0
+        if buf:
+            yield "".join(buf).encode("utf-8")
+
+    # Same transaction as the ORM session: the worker's commit/rollback applies
+    # to these rows exactly as it did to the executemany path.
     session.flush()
+    dbapi = session.connection().connection
+    with dbapi.cursor() as cur:
+        cur.copy_expert(
+            'COPY statement_line ({}) FROM STDIN'.format(", ".join(cols)),
+            _RowStream(chunks()),
+        )
     return len(lines)

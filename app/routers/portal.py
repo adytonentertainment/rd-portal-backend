@@ -24,7 +24,7 @@ account's CURRENT writer, so re-pointing takes effect immediately.
 import os
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -46,12 +46,17 @@ from app.models.statements import (
     StatementLine,
     Writer,
     WriterContact,
+    WriterStatus,
 )
 from app.routers.auth import ALGORITHM, SECRET_KEY, bcrypt_context, get_user
 from app.routers.statements_admin import require_admin
 from app.services.portal import invites as invite_svc
 from app.services.statement_ingest.storage import resolve_stored_path
-from app.services.portal.invite_delivery import invite_url, send_invite_email
+from app.services.portal.invite_delivery import (
+    invite_url,
+    send_invite_email,
+    send_invite_emails,
+)
 
 logger = get_logger("portal")
 
@@ -69,6 +74,13 @@ SUPPORTED_LANGUAGES = {"en", "es"}
 class InviteRequest(BaseModel):
     email: EmailStr
     role: str = "manager"
+
+
+class BulkInviteRequest(BaseModel):
+    writer_ids: List[int]
+    # Off by default: re-running the batch after fixing a few addresses
+    # should not mail everyone who already has a live link a second time.
+    resend_pending: bool = False
 
 
 class AcceptRequest(BaseModel):
@@ -94,6 +106,41 @@ def current_contact(
     return contact
 
 
+# WHO MAY HAND OUT ACCESS. Every contact linked to a writer can READ
+# everything about it — that is the point of the portal, and a manager or an
+# attorney who cannot see the money is useless. What separates them is whether
+# they can change WHO ELSE gets in.
+#
+# Only the primary contact can. A manager, an attorney, or anyone invited as
+# "other" is a guest: they read, they manage their own login and language, and
+# that is all. Access to someone's royalties should not spread sideways without
+# the person whose royalties they are, and before this every guest could invite
+# further guests and revoke the primary's own invites.
+MANAGE_ACCESS_ROLES = {ContactRole.PRIMARY}
+
+
+def _can_manage_access(db: Session, contact: Contact, writer_id: int) -> bool:
+    link = (
+        db.query(WriterContact)
+        .filter(WriterContact.writer_id == writer_id, WriterContact.contact_id == contact.id)
+        .first()
+    )
+    return link is not None and link.role in MANAGE_ACCESS_ROLES
+
+
+def _require_manage_access(db: Session, contact: Contact, writer_id: int) -> Writer:
+    """Read access AND the right to change who else has it."""
+    writer = _require_writer_access(db, contact, writer_id)
+    if not _can_manage_access(db, contact, writer_id):
+        # 403, not 404: they legitimately see this writer, so hiding its
+        # existence would only be confusing. What they lack is the right.
+        raise HTTPException(
+            status_code=403,
+            detail="Only the primary contact for this client can change who has access",
+        )
+    return writer
+
+
 def _require_writer_access(db: Session, contact: Contact, writer_id: int) -> Writer:
     link = (
         db.query(WriterContact)
@@ -106,18 +153,32 @@ def _require_writer_access(db: Session, contact: Contact, writer_id: int) -> Wri
     return db.get(Writer, writer_id)
 
 
-def _writer_card(db: Session, writer: Writer) -> dict:
+def _writer_card(db: Session, writer: Writer, contact: Contact = None) -> dict:
     account_count = (
         db.query(BeneficiaryAccount)
         .filter(BeneficiaryAccount.writer_id == writer.id)
         .count()
     )
-    return {
+    card = {
         "id": writer.id,
         "name": writer.canonical_name,
         "kind": writer.kind.value if writer.kind else None,
         "account_count": account_count,
     }
+    if contact is not None:
+        # So the portal can hide the invite controls rather than offering a
+        # button that 403s. The server still enforces it; this is only cosmetics.
+        link = (
+            db.query(WriterContact)
+            .filter(
+                WriterContact.writer_id == writer.id,
+                WriterContact.contact_id == contact.id,
+            )
+            .first()
+        )
+        card["my_role"] = link.role.value if link else None
+        card["can_manage_access"] = bool(link and link.role in MANAGE_ACCESS_ROLES)
+    return card
 
 
 def _mint_token(user: User) -> str:
@@ -142,7 +203,7 @@ async def get_me(
         "email": contact.email,
         "display_name": contact.display_name,
         "preferred_language": contact.preferred_language,
-        "writers": [_writer_card(db, w) for w in writers],
+        "writers": [_writer_card(db, w, contact) for w in writers],
     }
 
 
@@ -152,7 +213,7 @@ async def list_my_writers(
 ):
     writer_ids = invite_svc.writer_ids_for_contact(db, contact)
     writers = db.query(Writer).filter(Writer.id.in_(writer_ids or [0])).all()
-    return [_writer_card(db, w) for w in writers]
+    return [_writer_card(db, w, contact) for w in writers]
 
 
 @me_router.get("/statements")
@@ -606,8 +667,9 @@ async def share_writer_access(
     db: Session = Depends(get_session),
 ):
     """Share access to a writer with another email (like adding someone to a
-    Dropbox folder). The inviter must already have access to that writer."""
-    _require_writer_access(db, contact, writer_id)
+    Dropbox folder). Restricted to the writer's primary contact — a guest must
+    not be able to widen access to someone else's royalties."""
+    _require_manage_access(db, contact, writer_id)
     inviter_user_id = contact.user_id
     try:
         invite, raw = invite_svc.create_invite(
@@ -642,7 +704,7 @@ async def revoke_my_invite(
     inv = db.get(PortalInvite, invite_id)
     if inv is None:
         raise HTTPException(status_code=404, detail="Invite not found")
-    _require_writer_access(db, contact, inv.writer_id)  # must own the folder
+    _require_manage_access(db, contact, inv.writer_id)  # must own the folder
     invite_svc.revoke_invite(db, invite_id)
     return {"invite_id": invite_id, "status": "revoked"}
 
@@ -716,6 +778,126 @@ async def admin_resend_invite(
         "invite_url": invite_url(raw),
         "delivery_status": invite.delivery_status,
     }
+
+
+@writer_invites_admin_router.post("/bulk-invite")
+async def admin_bulk_invite(
+    body: BulkInviteRequest,
+    background: BackgroundTasks,
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_session),
+):
+    """Invite many clients to their portals in one pass.
+
+    Onboarding a roster one dialog at a time is hundreds of clicks, and the
+    clicking is where mistakes live. This takes the selected clients, works out
+    who to write to for each, and hands the whole batch to one paced background
+    send.
+
+    ONE ADDRESS PER CLIENT — their primary contact, or the first one on file if
+    no contact is marked primary. Managers and attorneys can be added afterwards
+    per client; nobody wants a bulk action that quietly mails three people about
+    one catalog.
+
+    Everything it declines to do comes back in `skipped` with a reason, because
+    "412 invited" is a useless answer when 90 of them had no email on file. The
+    reasons are the work list: fill in those addresses, run it again.
+
+    The response deliberately carries NO invite tokens. The single-invite
+    endpoint returns one so an admin can copy that link by hand; a bulk response
+    would be hundreds of live bearer credentials in one payload, sitting in
+    browser memory and logs. Links for individual clients stay one click away in
+    their own invite dialog.
+    """
+    ids = list(dict.fromkeys(body.writer_ids or []))
+    if not ids:
+        raise HTTPException(status_code=422, detail="No clients selected")
+    # Above this a single request stops being an admin action and becomes an
+    # unattended mail campaign; page through the roster instead.
+    if len(ids) > 500:
+        raise HTTPException(status_code=422, detail="Invite at most 500 clients at a time")
+
+    now = datetime.now()
+    queued, skipped, pairs = [], [], []
+
+    def skip(writer, writer_id, reason):
+        skipped.append({
+            "writer_id": writer_id,
+            "name": writer.canonical_name if writer else None,
+            "reason": reason,
+        })
+
+    for writer_id in ids:
+        writer = db.get(Writer, writer_id)
+        if writer is None:
+            skip(None, writer_id, "not found")
+            continue
+        # The publisher's own books, not a client — there is nobody to invite.
+        if writer.is_house_account:
+            skip(writer, writer_id, "house account")
+            continue
+        if writer.status == WriterStatus.OFFBOARDED:
+            skip(writer, writer_id, "offboarded")
+            continue
+
+        links = (
+            db.query(WriterContact, Contact)
+            .join(Contact, WriterContact.contact_id == Contact.id)
+            .filter(WriterContact.writer_id == writer_id)
+            .all()
+        )
+        if not links:
+            skip(writer, writer_id, "no email on file")
+            continue
+
+        # Someone on this catalog already signed in — inviting them again would
+        # mail an existing user a link to make an account they already have.
+        if any(contact.user_id is not None for _, contact in links):
+            skip(writer, writer_id, "portal already active")
+            continue
+
+        invites = (
+            db.query(PortalInvite).filter(PortalInvite.writer_id == writer_id).all()
+        )
+        if any(inv.accepted_at is not None for inv in invites):
+            skip(writer, writer_id, "portal already active")
+            continue
+        if not body.resend_pending and any(inv.is_active(now) for inv in invites):
+            skip(writer, writer_id, "invite already pending")
+            continue
+
+        # Their primary contact, or whoever is on file if none is marked.
+        link, contact = next(
+            ((l, c) for l, c in links if l.role == ContactRole.PRIMARY),
+            links[0],
+        )
+
+        try:
+            invite, raw = invite_svc.create_invite(
+                db, writer_id, contact.email, link.role,
+                invited_by_user_id=user.id, is_admin_invite=True,
+            )
+        except ValueError as e:
+            # One client's problem must not sink the batch.
+            skip(writer, writer_id, str(e))
+            continue
+
+        pairs.append((invite.id, raw))
+        queued.append({
+            "writer_id": writer_id,
+            "name": writer.canonical_name,
+            "email": invite.email,
+            "invite_id": invite.id,
+        })
+
+    if pairs:
+        background.add_task(send_invite_emails, pairs)
+
+    logger.info(
+        f"admin {user.id} bulk-invited {len(queued)} of {len(ids)} clients "
+        f"({len(skipped)} skipped)"
+    )
+    return {"requested": len(ids), "queued": queued, "skipped": skipped}
 
 
 @writer_invites_admin_router.get("/{writer_id}/invites")
@@ -805,5 +987,5 @@ async def accept_invite(
         "access_token": _mint_token(user),
         "token_type": "bearer",
         "email": contact.email,
-        "writers": [_writer_card(db, w) for w in writers],
+        "writers": [_writer_card(db, w, contact) for w in writers],
     }

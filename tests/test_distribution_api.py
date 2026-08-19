@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from app.database.session import get_session
 from app.models.models import User
 from app.models.statements import (
+    Cadence,
     BatchStatus,
     BeneficiaryAccount,
     Catalog,
@@ -49,7 +50,10 @@ def scenario(session):
                        catalog=Catalog.YT, status=BatchStatus.APPROVED)
     session.add(b)
     session.flush()
-    w = Writer(publisher_id=pub.id, canonical_name="RedZed", kind=WriterKind.CLIENT)
+    # revenue type + cadence set: the gate blocks any batch still holding a
+    # client that needs attention.
+    w = Writer(publisher_id=pub.id, canonical_name="RedZed", kind=WriterKind.CLIENT,
+               expected_catalogs=["YT"], cadence=Cadence.SEMIANNUAL)
     session.add(w)
     session.flush()
     acct = BeneficiaryAccount(writer_id=w.id, account_code="C00616", catalog=Catalog.YT)

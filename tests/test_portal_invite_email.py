@@ -111,3 +111,47 @@ def test_signoff_is_localised(sent):
         mailer, "a@b.com", "X", "https://x/i", invited_by="RD", language="es")
     assert "Atentamente," in box["html"]
     assert "Kind regards" not in box["html"]
+
+
+def test_invite_names_the_address_the_access_is_bound_to(sent):
+    """Accepting mints the login for the invited address, so the mail has to
+    say which one — plenty of these clients gave us a manager's mailbox and
+    would otherwise try to sign in with their own."""
+    mailer, box = sent
+    EMail.send_portal_invite_email(
+        mailer, "manager@label.com", "Amenazzy", "https://x/i",
+        expires_at=EXPIRY, invited_by="Regalias Digitales", language="en",
+    )
+    assert "manager@label.com" in box["html"]
+
+    EMail.send_portal_invite_email(
+        mailer, "manager@label.com", "Amenazzy", "https://x/i",
+        expires_at=EXPIRY, invited_by="Regalias Digitales", language="es",
+    )
+    assert "manager@label.com" in box["html"]
+
+
+def test_plain_text_part_survives_the_bullets(sent):
+    """Half these mailboxes are read on a phone client that renders the plain
+    part. Bullets written as HTML entities would arrive as literal '&bull;'."""
+    mailer, box = sent
+    EMail.send_portal_invite_email(
+        mailer, "a@b.com", "X", "https://x/i", invited_by="RD", language="en",
+    )
+    plain = EMail._strip_html_to_plain(mailer, box["html"])
+    assert "• read each statement by period" in plain
+    assert "&bull;" not in plain
+
+
+def test_plain_text_part_is_the_message_not_the_stylesheet(sent):
+    """The template carries a <style> block whose CONTENTS survive naive
+    tag-stripping — the plain part used to open with 60 lines of CSS before
+    reaching a word of the email."""
+    mailer, box = sent
+    EMail.send_portal_invite_email(
+        mailer, "a@b.com", "X", "https://x/i", invited_by="RD",
+    )
+    plain = EMail._strip_html_to_plain(mailer, box["html"])
+    assert "font-family" not in plain
+    assert "@media" not in plain
+    assert not any(line.startswith(" ") for line in plain.splitlines())

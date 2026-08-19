@@ -1,11 +1,12 @@
 """Readiness gate (ingestion PRD §5, Stage C precondition).
 
-A batch is `ready` to distribute only when:
-  - zero OPEN blocker findings remain (fixed+re-ingested, or waived), and
-  - every non-house statement is parseable AND resolved to a real writer
-    (client-import identity, not an ingestion placeholder).
+A batch is `ready` to distribute only when nothing in it still needs
+attention: every non-house, non-offboarded statement is parsed, matched to a
+real client (not an ingestion placeholder), and that client has the baseline
+info a send depends on.
 
-Warnings are surfaced but never block (they're acknowledged, not gating).
+Validation findings, reconciliation and PDF/XLSX pairing do NOT gate —
+statement auditing is off by design.
 The gate is pure/read-only; the Distribute action calls it and refuses unless
 `ready` is true.
 """
@@ -57,38 +58,85 @@ def compute_gate(db: Session, batch_id: int) -> Dict:
         .all()
     )
 
-    # Statement auditing is disabled by design — we do NOT block on validation
-    # findings, reconciliation, or PDF/XLSX pairing. A batch is ready to
-    # distribute as long as it has statements to send. House accounts and
-    # offboarded clients are excluded; everything else (incl. not-yet-matched
-    # placeholders) is distributable.
+    # NOTHING THAT NEEDS ATTENTION MAY BE IN A SEND (Steven, 2026-08-18).
+    #
+    # This previously EXCLUDED unresolved rows and sent the rest: a statement
+    # whose account no client-list row claims was quietly dropped from the
+    # batch and the publisher was told the send succeeded. The money for that
+    # account then sits undelivered with nothing on screen saying so.
+    #
+    # So an unresolved row now BLOCKS the batch it appears in. Fixing one is
+    # not busywork — it is deciding who gets paid — and the reasons below name
+    # each blocker so the fix list is the gate itself.
+    #
+    # Still not blocking: validation findings, reconciliation and PDF/XLSX
+    # pairing (auditing stays off by design), house accounts, and clients
+    # already offboarded.
     total = len(rows)
-    house = distributable = excluded = 0
+    house = distributable = offboarded = unparsed = 0
+    unmatched_names, missing_info_names = [], []
+
     for stmt, acct, writer in rows:
         if writer.is_house_account:
             house += 1
             continue
-        # excluded (not sent, not blocking): offboarded clients, statements not
-        # parsed yet (no total), and placeholders not matched to a client
-        if (
-            writer.status == WriterStatus.OFFBOARDED
-            or stmt.parse_status != ParseStatus.PARSED
-            or writer.kind is None
-        ):
-            excluded += 1
+        if writer.status == WriterStatus.OFFBOARDED:
+            offboarded += 1
+            continue
+        if stmt.parse_status != ParseStatus.PARSED:
+            # Not yet readable, so not yet sendable — and not yet a decision
+            # anyone can make. Counted, not blamed on the client.
+            unparsed += 1
+            continue
+        if writer.kind is None:
+            # A placeholder holding somebody's statement. Who it belongs to is
+            # unanswered, so sending is guesswork.
+            name = acct.display_name or writer.canonical_name
+            if name not in unmatched_names:
+                unmatched_names.append(name)
+            continue
+        if not writer.expected_catalogs or writer.cadence is None:
+            name = writer.canonical_name
+            if name not in missing_info_names:
+                missing_info_names.append(name)
             continue
         distributable += 1
 
-    reasons = [] if distributable > 0 else ["nothing to distribute in this batch"]
+    reasons = []
+    if unmatched_names:
+        reasons.append(
+            f"{len(unmatched_names)} account(s) not matched to a client: "
+            + ", ".join(unmatched_names[:5])
+            + ("…" if len(unmatched_names) > 5 else "")
+        )
+    if missing_info_names:
+        reasons.append(
+            f"{len(missing_info_names)} client(s) missing revenue type or cadence: "
+            + ", ".join(missing_info_names[:5])
+            + ("…" if len(missing_info_names) > 5 else "")
+        )
+    if unparsed:
+        reasons.append(f"{unparsed} statement(s) not parsed yet")
+    if not reasons and distributable == 0:
+        reasons.append("nothing to distribute in this batch")
+
     return {
         "batch_id": batch_id,
-        "ready": distributable > 0,
-        "open_blockers": 0,
+        "ready": not reasons,
+        "open_blockers": len(unmatched_names) + len(missing_info_names),
         "counts": {
             "total": total,
             "distributable": distributable,
             "house_excluded": house,
-            "offboarded_excluded": excluded,
+            "offboarded_excluded": offboarded,
+            "unparsed": unparsed,
+            "unmatched": len(unmatched_names),
+            "missing_info": len(missing_info_names),
+        },
+        # The fix list, in the order a publisher would work it.
+        "needs_attention": {
+            "unmatched": unmatched_names,
+            "missing_info": missing_info_names,
         },
         "reasons": reasons,
     }

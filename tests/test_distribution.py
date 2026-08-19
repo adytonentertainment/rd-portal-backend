@@ -5,6 +5,7 @@ from decimal import Decimal
 import pytest
 
 from app.models.statements import (
+    Cadence,
     BatchStatus,
     BeneficiaryAccount,
     Catalog,
@@ -58,7 +59,12 @@ def _batch(session, period, catalog):
 
 
 def _writer(session, name, kind=WriterKind.CLIENT, house=False):
+    # Fully specified on purpose: the gate now refuses to send a batch that
+    # still contains anything needing attention, and a client with no revenue
+    # type or cadence is exactly that. These tests are about distribution
+    # mechanics (supersede, dedup, visibility), so their clients are ready.
     w = Writer(publisher_id=_pub(session).id, canonical_name=name, kind=kind,
+               expected_catalogs=["YT", "MECH"], cadence=Cadence.SEMIANNUAL,
                is_house_account=house)
     session.add(w)
     session.flush()
@@ -97,10 +103,14 @@ def _blocker(session, batch):
 
 # --- gate --------------------------------------------------------------------
 
-def test_gate_ignores_findings_and_placeholders(session):
-    """Statement auditing is disabled: an open blocker finding and unmatched
-    placeholders never block. The gate is ready as long as there's ≥1
-    distributable (matched, non-house, non-offboarded) statement."""
+def test_gate_blocks_a_batch_holding_an_unmatched_account(session):
+    """An account no client-list row claims BLOCKS the batch it is in.
+
+    It used to be excluded and the rest sent, which meant the publisher was
+    told the send succeeded while somebody's statement was silently dropped —
+    their money sitting undelivered with nothing on screen saying so. Deciding
+    who an account belongs to is deciding who gets paid.
+    """
     b = _batch(session, "PUB26H1", Catalog.YT)
     resolved = _writer(session, "RedZed")
     placeholder = _writer(session, "Placeholder Co", kind=None)
@@ -108,15 +118,46 @@ def test_gate_ignores_findings_and_placeholders(session):
     _stmt(session, b, resolved, "C00616", "PUB26H1")
     _stmt(session, b, placeholder, "C00999", "PUB26H1")
     _stmt(session, b, house, "CS0001", "PUB26H1")
+    session.commit()
+
+    gate = compute_gate(session, b.id)
+    assert gate["ready"] is False
+    assert gate["counts"]["unmatched"] == 1
+    assert gate["needs_attention"]["unmatched"] == ["Placeholder Co"]
+    # the reason names it, so the gate IS the fix list
+    assert "Placeholder Co" in gate["reasons"][0]
+    # the publisher's own books are never a blocker
+    assert gate["counts"]["house_excluded"] == 1
+
+
+def test_gate_blocks_a_client_missing_revenue_type_or_cadence(session):
+    b = _batch(session, "PUB26H1", Catalog.YT)
+    w = _writer(session, "Lupita Vega")
+    w.cadence = None
+    _stmt(session, b, w, "C00777", "PUB26H1")
+    session.commit()
+
+    gate = compute_gate(session, b.id)
+    assert gate["ready"] is False
+    assert gate["needs_attention"]["missing_info"] == ["Lupita Vega"]
+
+
+def test_gate_is_green_when_nothing_needs_attention(session):
+    """Audit findings still do NOT gate — statement auditing is off by design.
+    Only unresolved clients do."""
+    b = _batch(session, "PUB26H1", Catalog.YT)
+    resolved = _writer(session, "RedZed")
+    house = _writer(session, "Regalias Digitales, LLC", kind=None, house=True)
+    _stmt(session, b, resolved, "C00616", "PUB26H1")
+    _stmt(session, b, house, "CS0001", "PUB26H1")
     _blocker(session, b)  # a finding no longer gates anything
     session.commit()
 
     gate = compute_gate(session, b.id)
     assert gate["ready"] is True
-    assert gate["open_blockers"] == 0
-    assert gate["counts"]["house_excluded"] == 1
-    assert gate["counts"]["distributable"] == 1  # only the resolved writer
     assert gate["reasons"] == []
+    assert gate["counts"]["distributable"] == 1
+    assert gate["counts"]["house_excluded"] == 1
 
 
 # --- publish -----------------------------------------------------------------

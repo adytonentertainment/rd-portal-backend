@@ -41,7 +41,13 @@ class EMail:
     def _strip_html_to_plain(self, html):
         """Convert HTML to plain text for multipart/alternative."""
         import re
-        text = re.sub(r'<br\s*/?>', '\n', html)
+        # Drop what is markup furniture rather than message. Stripping tags
+        # alone leaves the CONTENTS of <style> behind, so the plain part —
+        # the one phone clients and spam filters actually read — opened with
+        # 60 lines of CSS before reaching a word of the email.
+        text = re.sub(r'(?is)<(script|style)[^>]*>.*?</\1>', '', html)
+        text = re.sub(r'(?is)<head[^>]*>.*?</head>', '', text)
+        text = re.sub(r'<br\s*/?>', '\n', text)
         text = re.sub(r'<a[^>]+href="([^"]*)"[^>]*>[^<]*</a>', r'\1', text)
         text = re.sub(r'<[^>]+>', '', text)
         text = re.sub(r'&nbsp;', ' ', text)
@@ -49,6 +55,10 @@ class EMail:
         text = re.sub(r'&copy;', '(c)', text)
         text = re.sub(r'&quot;', '"', text)
         text = re.sub(r'&#\d+;', '', text)
+        # Table-based email markup is indented a dozen levels deep, and that
+        # indentation survives tag-stripping as leading whitespace on every
+        # line.
+        text = '\n'.join(line.strip() for line in text.split('\n'))
         text = re.sub(r'\n{3,}', '\n\n', text)
         return text.strip()
 
@@ -249,21 +259,44 @@ class EMail:
             title = f"Su portal de regalías para {writer_name} — {sender}"
             message = (
                 f"{sender} le invita a acceder al portal de regalías de "
-                f"<b>{writer_name}</b>.<br><br>"
-                f"Allí puede consultar sus estados de cuenta, los ingresos por "
-                f"canción y territorio, y descargar los documentos "
-                f"correspondientes.{expiry}<br><br>"
-                f"Si no esperaba este mensaje, puede ignorarlo."
+                f"<b>{writer_name}</b>, donde a partir de ahora estarán sus "
+                f"estados de cuenta, disponibles cuando los necesite.<br><br>"
+                f"Allí puede:<br>"
+                f"• consultar cada estado de cuenta por período, con los "
+                f"totales que respaldan cada pago<br>"
+                f"• ver lo que generó cada canción, por fuente y por "
+                f"territorio<br>"
+                f"• descargar los documentos originales cuando quiera<br><br>"
+                f"Use el botón de abajo para abrir su portal y elegir una "
+                f"contraseña. Su acceso queda vinculado a esta dirección, "
+                f"{recipient_email}.{expiry}<br><br>"
+                f"La forma en que se le paga no cambia: el portal es donde vive "
+                f"la documentación que respalda esos pagos.<br><br>"
+                f"Si no esperaba este mensaje, puede ignorarlo. Si lo esperaba "
+                f"pero algo no le parece correcto, consulte con {sender} antes "
+                f"de iniciar sesión."
             )
             button = "Abrir su portal"
         else:
             title = f"Your royalty portal for {writer_name} — {sender}"
             message = (
                 f"{sender} has invited you to access the royalty portal for "
-                f"<b>{writer_name}</b>.<br><br>"
-                f"There you can see your statements, earnings by song and "
-                f"territory, and download the underlying documents.{expiry}<br><br>"
-                f"If you were not expecting this email, you can ignore it."
+                f"<b>{writer_name}</b> — where your royalty statements now "
+                f"live, available whenever you want to look at them.<br><br>"
+                f"Inside you can:<br>"
+                f"• read each statement by period, with the totals behind "
+                f"every payment<br>"
+                f"• see what each song earned, by source and by territory<br>"
+                f"• download the original statement documents at any time"
+                f"<br><br>"
+                f"Use the button below to open your portal and choose a "
+                f"password. Your access is tied to this address, "
+                f"{recipient_email}.{expiry}<br><br>"
+                f"How you get paid does not change — the portal is where the "
+                f"paperwork behind those payments lives.<br><br>"
+                f"If you were not expecting this email, you can ignore it. If "
+                f"you were expecting it but something here looks wrong, check "
+                f"with {sender} before signing in."
             )
             button = "Open your portal"
 

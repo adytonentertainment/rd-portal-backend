@@ -26,6 +26,7 @@ from app.database.session import get_session
 from app.logger.logger import get_logger
 from app.models.models import User
 from app.models.statements import (
+    AliasSource,
     BeneficiaryAccount,
     Cadence,
     Catalog,
@@ -46,6 +47,7 @@ from app.models.statements import (
 from app.routers.statements_admin import require_admin
 from app.services.client_import.matcher import normalize as normalize_name
 from app.services.portal import invites as invite_svc
+from app.services.writers.suggest import suggest_clients_for
 
 logger = get_logger("writers_admin")
 
@@ -181,6 +183,44 @@ def _missing_info(w: Writer) -> List[str]:
     return missing
 
 
+def _writer_ids_with_data_gap(db: Session) -> List[int]:
+    """Payees whose statement data is missing or only partial.
+
+    Two different gaps, both of which block a clean send:
+      * NO statements at all — nothing arrived for them this cycle.
+      * PARTIAL — they are expected to have both revenue types (mechanical and
+        YouTube) and only one turned up. A roster count says "has statements"
+        and looks fine, which is exactly why this one goes unnoticed.
+
+    House accounts are the publisher's own books and are never a client gap.
+    """
+    expected_by_writer = {
+        w.id: set(w.expected_catalogs or [])
+        for w in db.query(Writer).filter(Writer.is_house_account.is_(False)).all()
+    }
+
+    received = {}
+    for writer_id, catalog in (
+        db.query(BeneficiaryAccount.writer_id, BeneficiaryAccount.catalog)
+        .join(Statement, Statement.account_id == BeneficiaryAccount.id)
+        .distinct()
+        .all()
+    ):
+        if catalog is not None:
+            received.setdefault(writer_id, set()).add(catalog.value)
+        else:
+            received.setdefault(writer_id, set())
+
+    gaps = []
+    for writer_id, expected in expected_by_writer.items():
+        got = received.get(writer_id)
+        if not got:
+            gaps.append(writer_id)          # nothing arrived
+        elif expected and not expected.issubset(got):
+            gaps.append(writer_id)          # only some of what they should have
+    return gaps
+
+
 def _portal_status_for(links, invites) -> str:
     """none | invited | active. `active` when any linked contact already has a
     login (contact.user_id) or any invite is accepted; `invited` when there's a
@@ -195,7 +235,8 @@ def _portal_status_for(links, invites) -> str:
     return "none"
 
 
-def _serialize_list_row(w: Writer, links, invites, account_count: int, coverage=None, last_dist=None) -> dict:
+def _serialize_list_row(w: Writer, links, invites, account_count: int, coverage=None,
+                        last_dist=None, suggestion=None, account_name=None) -> dict:
     primary = None
     emails = []
     for link, contact in links:
@@ -222,6 +263,12 @@ def _serialize_list_row(w: Writer, links, invites, account_count: int, coverage=
         "no_statements": (cov or {}).get("statements", 0) == 0 and not w.is_house_account,
         # a statement account no client-list row claims — resolve, don't fill in
         "is_unmatched": w.kind is None and not w.is_house_account,
+        # For an unmatched row: the name printed on the statement filename (the
+        # account's real identity) and the closest client to it, so the
+        # publisher can answer "is this someone we already have?" without
+        # searching the roster by hand. A proposal only — nothing is re-pointed.
+        "account_name": account_name,
+        "suggested_client": suggestion,
         "primary_email": primary,
         "contact_emails": emails,
         "account_count": account_count,
@@ -254,6 +301,8 @@ async def list_writers(
     needs_info: Optional[bool] = None,
     needs_fix: Optional[bool] = None,
     unmatched: Optional[bool] = None,
+    include_unmatched: Optional[bool] = None,
+    data_gap: Optional[bool] = None,
     membership: Optional[str] = None,
     include_house: bool = False,
     user: User = Depends(require_admin),
@@ -281,6 +330,12 @@ async def list_writers(
     is_unmatched = and_(Writer.kind.is_(None), Writer.id.in_(holds_accounts))
     if unmatched is True:
         q = q.filter(is_unmatched)
+    elif include_unmatched:
+        # One list, not two. An unmatched account is a payee the publisher has
+        # to make a decision about, exactly like a client with no statements —
+        # splitting them into a separate panel hides the one that needs the most
+        # thought. Callers that want the strict client list simply omit this.
+        pass
     elif unmatched is False or not needs_fix:
         q = q.filter(~is_unmatched)
     # Roster membership, from the imported client list. Without this the roster
@@ -296,6 +351,14 @@ async def list_writers(
             status_code=400,
             detail="membership must be 'client', 'commission_partner', or 'any'",
         )
+
+    if data_gap:
+        # "Show me who is missing data." A payee with NO statement at all, or
+        # with statements for only some of the revenue types they are supposed
+        # to have — partial delivery looks fine on a roster count and is the
+        # thing that quietly ships someone half their money.
+        gap_ids = _writer_ids_with_data_gap(db)
+        q = q.filter(Writer.id.in_(gap_ids or [0]))
 
     if kind:
         q = q.filter(Writer.kind == _parse_kind(kind))
@@ -425,6 +488,18 @@ async def list_writers(
             if cur is None or (published_at and cur[0] and published_at > cur[0]) or (published_at and not cur[0]):
                 last_dist_by_writer[wid] = (published_at, period_code)
 
+    # "Did you mean this client?" for the unmatched rows on this page only —
+    # batched, so a page render stays a fixed number of queries.
+    unmatched_ids = [w.id for w in writers if w.kind is None and not w.is_house_account]
+    suggestions = suggest_clients_for(db, unmatched_ids) if unmatched_ids else {}
+    account_names = {}
+    if unmatched_ids:
+        for acct in db.query(BeneficiaryAccount).filter(
+            BeneficiaryAccount.writer_id.in_(unmatched_ids)
+        ):
+            if acct.display_name and acct.writer_id not in account_names:
+                account_names[acct.writer_id] = acct.display_name
+
     items = [
         _serialize_list_row(
             w,
@@ -433,6 +508,8 @@ async def list_writers(
             counts_by_writer[w.id],
             coverage_by_writer[w.id],
             last_dist_by_writer.get(w.id),
+            suggestions.get(w.id),
+            account_names.get(w.id),
         )
         for w in writers
     ]
@@ -480,9 +557,13 @@ async def roster_summary(
         .all()
     )
     unmatched_accounts = len(unmatched_rows)
+    # The closest client to each unmatched name, so the dashboard can ask "did
+    # you mean X?" instead of only naming a code nobody recognises. Batched in
+    # one pass over the roster; a proposal only, never applied.
+    unmatched_suggestions = suggest_clients_for(db, [w.id for _, w in unmatched_rows[:100]])
     unmatched_samples = [
         {"account_code": a.account_code, "name": a.display_name or w.canonical_name,
-         "writer_id": w.id}
+         "writer_id": w.id, "suggested_client": unmatched_suggestions.get(w.id)}
         for a, w in unmatched_rows[:100]
     ]
 
@@ -1003,6 +1084,118 @@ async def archive_writer(
 
 class BulkRemoveRequest(BaseModel):
     writer_ids: List[int]
+
+
+class AssignAccountsRequest(BaseModel):
+    target_writer_id: int
+
+
+@writers_admin_router.post("/{writer_id}/assign")
+async def assign_unmatched_to_client(
+    writer_id: int,
+    body: AssignAccountsRequest,
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_session),
+):
+    """Hand an unmatched account's statements to the client they belong to.
+
+    This is the "did you mean X?" answer being accepted. It re-points the
+    beneficiary accounts from the placeholder row onto the real client, which
+    is the ONLY thing that has to change: portal reads resolve ownership
+    through the account's CURRENT writer, so the client sees the statements
+    immediately and nothing has to rewrite historical distribution rows.
+
+    Deliberately narrow, because assigning the wrong owner sends one client's
+    royalties to another and is close to unrecoverable:
+      * only an UNMATCHED row can be assigned (a real client's accounts are not
+        moved by a name guess),
+      * the target must be an actual client on the list, and
+      * a placeholder that has already had statements DISTRIBUTED is refused —
+        somebody has already been shown that money, and silently moving it is
+        a different and much bigger decision than resolving an identity.
+
+    The placeholder's name is kept as an alias on the client, so the next
+    import recognises the spelling instead of re-creating the same orphan.
+    """
+    placeholder = db.get(Writer, writer_id)
+    if placeholder is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+    if placeholder.is_house_account or placeholder.kind is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Only an unmatched account can be assigned to a client",
+        )
+
+    target = db.get(Writer, body.target_writer_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Client not found")
+    if target.id == placeholder.id:
+        raise HTTPException(status_code=422, detail="Cannot assign a row to itself")
+    if target.kind is None or target.is_house_account:
+        raise HTTPException(
+            status_code=409, detail="Target must be a client on your list"
+        )
+
+    already_sent = (
+        db.query(Distribution.id).filter(Distribution.writer_id == placeholder.id).first()
+    )
+    if already_sent is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "These statements have already been distributed under this name. "
+                "Unpublish them first — reassigning sent money is a separate decision."
+            ),
+        )
+
+    accounts = (
+        db.query(BeneficiaryAccount)
+        .filter(BeneficiaryAccount.writer_id == placeholder.id)
+        .all()
+    )
+    moved = [a.account_code for a in accounts]
+    for a in accounts:
+        # Re-point through the RELATIONSHIP, not the raw FK: deleting the
+        # placeholder below cascades over its `accounts` collection, and a
+        # collection that still lists these rows would null the very FK we just
+        # set — silently orphaning the statements instead of moving them.
+        a.writer = target
+
+    # Remember the spelling that did not match, so the next client-list import
+    # resolves it instead of creating this same orphan again.
+    orphan_name = (accounts[0].display_name if accounts else None) or placeholder.canonical_name
+    exists = (
+        db.query(WriterAlias)
+        .filter(WriterAlias.writer_id == target.id, WriterAlias.alias_name == orphan_name)
+        .first()
+    )
+    if exists is None and orphan_name and orphan_name != target.canonical_name:
+        db.add(WriterAlias(writer_id=target.id, alias_name=orphan_name,
+                           source=AliasSource.MANUAL))
+
+    # The placeholder existed only to hold those accounts; with them moved it
+    # references nothing, so it goes rather than lingering as a phantom client.
+    db.query(WriterContact).filter(WriterContact.writer_id == placeholder.id).delete(
+        synchronize_session=False
+    )
+    db.query(PortalInvite).filter(PortalInvite.writer_id == placeholder.id).delete(
+        synchronize_session=False
+    )
+    db.query(WriterAlias).filter(WriterAlias.writer_id == placeholder.id).delete(
+        synchronize_session=False
+    )
+    db.delete(placeholder)
+    db.commit()
+
+    logger.info(
+        f"admin {user.id} assigned {len(moved)} account(s) {moved} from unmatched "
+        f"'{orphan_name}' to client {target.id} '{target.canonical_name}'"
+    )
+    return {
+        "assigned_to": {"id": target.id, "name": target.canonical_name},
+        "account_codes": moved,
+        "alias_recorded": orphan_name,
+    }
 
 
 @writers_admin_router.post("/bulk-remove")

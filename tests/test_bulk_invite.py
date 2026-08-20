@@ -75,7 +75,10 @@ def make_writer(session, publisher, name, email=None, role=ContactRole.PRIMARY,
         c = Contact(email=email, user_id=user.id if user else None)
         session.add(c)
         session.flush()
-        session.add(WriterContact(writer_id=w.id, contact_id=c.id, role=role))
+        # has_login means THIS client's portal was claimed, so the claim goes on
+        # the link — an address with a login elsewhere is still uninvited here.
+        session.add(WriterContact(writer_id=w.id, contact_id=c.id, role=role,
+                                  user_id=user.id if user else None))
     session.commit()
     return w
 

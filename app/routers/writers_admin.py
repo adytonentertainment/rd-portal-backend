@@ -222,12 +222,18 @@ def _writer_ids_with_data_gap(db: Session) -> List[int]:
 
 
 def _portal_status_for(links, invites) -> str:
-    """none | invited | active. `active` when any linked contact already has a
-    login (contact.user_id) or any invite is accepted; `invited` when there's a
-    live pending invite; else `none`."""
+    """none | invited | active — about THIS client's portal.
+
+    `active` means somebody accepted an invite to this client. It used to also
+    return active when any linked contact merely had a login, which made a
+    recorded contact email look like a live portal: paste the address of a
+    manager who already runs another client's portal into this client's contact
+    field and the row read "Portal active" though nobody had been invited here.
+
+    That badge is how an admin decides whether to send an invite, so it has to
+    answer for the client in front of them, not for the email address.
+    """
     now = datetime.now()
-    if any(c.user_id is not None for _, c in links):
-        return "active"
     if any(inv.accepted_at is not None for inv in invites):
         return "active"
     if any(inv.is_active(now) for inv in invites):
@@ -624,8 +630,7 @@ async def roster_summary(
     # portal claim status across active clients
     portal_active = (
         db.query(func.count(func.distinct(WriterContact.writer_id)))
-        .join(Contact, WriterContact.contact_id == Contact.id)
-        .filter(Contact.user_id.isnot(None))
+        .filter(WriterContact.user_id.isnot(None))
         .scalar()
         or 0
     )
@@ -923,7 +928,8 @@ async def get_writer(
                 "email": c.email,
                 "display_name": c.display_name,
                 "role": link.role.value,
-                "has_login": c.user_id is not None,
+                # Claimed THIS client — not "this address has a login somewhere".
+                "has_login": link.user_id is not None,
             }
             for link, c in links
         ],

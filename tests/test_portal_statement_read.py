@@ -2,6 +2,8 @@
 
 from decimal import Decimal
 
+from datetime import datetime
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -9,6 +11,7 @@ from fastapi.testclient import TestClient
 from app.database.session import get_session
 from app.models.models import User
 from app.models.statements import (
+    PortalInvite,
     BeneficiaryAccount,
     Catalog,
     Contact,
@@ -74,7 +77,9 @@ def scenario(session, tmp_path):
     st_contact = Contact(email="stranger@x.com", user_id=st_user.id)
     session.add_all([rz_contact, st_contact])
     session.flush()
-    session.add(WriterContact(writer_id=w.id, contact_id=rz_contact.id))
+    session.add(WriterContact(writer_id=w.id, contact_id=rz_contact.id, user_id=rz_user.id))
+    session.add(PortalInvite(writer_id=w.id, email=rz_contact.email, token_hash="granted-rz",
+                             expires_at=datetime.now(), accepted_at=datetime.now()))
     session.commit()
     return {"dist_id": dist.id, "rz_user": rz_user, "stranger_user": st_user}
 

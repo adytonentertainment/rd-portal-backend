@@ -213,6 +213,13 @@ class WriterContact(Base):
     writer_id = Column(Integer, ForeignKey("writer.id"), nullable=False, index=True)
     contact_id = Column(Integer, ForeignKey("contact.id"), nullable=False, index=True)
     role = Column(Enum(ContactRole), nullable=False, default=ContactRole.PRIMARY)
+    # THE CLAIM. Null until somebody accepts an invite for this (writer, email)
+    # pair; then it points at the login they created for THIS client only.
+    #
+    # Identity is per client, not per mailbox. The same address claiming a
+    # second client makes a second login with its own username and password —
+    # signing into one shows that client and nothing else.
+    user_id = Column(Integer, ForeignKey("User.id"), nullable=True, index=True)
 
     writer = relationship("Writer", back_populates="contact_links")
     contact = relationship("Contact", back_populates="writer_links")

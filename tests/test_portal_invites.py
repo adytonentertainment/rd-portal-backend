@@ -167,10 +167,16 @@ def _issue_invite(session, writer_id, email):
     return raw
 
 
-def test_invite_link_cannot_take_over_an_existing_account(session, seed):
-    """THE takeover: holding a link for an email that already has a login must
-    NOT mint a session. Anyone forwarded the link (or reading it out of a log)
-    would otherwise become that user — including an admin."""
+def test_invite_link_never_touches_an_existing_account(session, seed):
+    """THE takeover, under the per-client identity model.
+
+    Holding a link for an address that already has a login must never mint a
+    session as that login. It cannot any more, by construction: every
+    acceptance creates its OWN account for the client it names, so a forwarded
+    link (or one read out of a log) yields a fresh, empty portal for that one
+    client — never control of somebody's existing account, and never their
+    other clients.
+    """
     from app.routers.auth import bcrypt_context
 
     victim = User(
@@ -185,29 +191,54 @@ def test_invite_link_cannot_take_over_an_existing_account(session, seed):
     raw = _issue_invite(session, seed["writer_id"], "victim@example.com")
     client = TestClient(_accept_app(session))
 
-    # no password at all -> refused
+    # a password is always required — it creates the new login
     r = client.post("/portal/accept-invite", json={"token": raw})
-    assert r.status_code == 401, r.text
+    assert r.status_code == 400, r.text
     assert "access_token" not in r.json()
 
-    # wrong password -> refused
-    r = client.post("/portal/accept-invite", json={"token": raw, "password": "guess"})
-    assert r.status_code == 401, r.text
-    assert "access_token" not in r.json()
-
-    # the invite must still be unaccepted and grant no access
-    from app.models.statements import PortalInvite
-
-    inv = session.query(PortalInvite).filter(PortalInvite.email == "victim@example.com").one()
-    assert inv.accepted_at is None
-    assert session.query(WriterContact).count() == 0
-
-    # correct password -> accepted
     r = client.post(
-        "/portal/accept-invite", json={"token": raw, "password": "the-real-password"}
+        "/portal/accept-invite",
+        json={"token": raw, "password": "a-new-password", "username": "victim_amenazzy"},
     )
     assert r.status_code == 200, r.text
-    assert r.json()["access_token"]
+
+    # a SEPARATE account was created; the victim's own login is untouched
+    minted = session.query(User).filter(User.username == "victim_amenazzy").one()
+    assert minted.id != victim.id
+    session.refresh(victim)
+    assert bcrypt_context.verify("the-real-password", victim.hashed_password)
+
+    # and the new login reaches exactly the one client it was invited to
+    from app.services.portal import invites as invite_svc
+
+    assert invite_svc.writer_ids_for_user(session, minted) == [seed["writer_id"]]
+    assert invite_svc.writer_ids_for_user(session, victim) == []
+
+
+def test_a_claim_gets_the_username_it_asks_for(session, seed):
+    """The username is what tells one portal from another at the login screen,
+    so the person claiming picks it."""
+    raw = _issue_invite(session, seed["writer_id"], "mgr@example.com")
+    client = TestClient(_accept_app(session))
+    r = client.post(
+        "/portal/accept-invite",
+        json={"token": raw, "password": "hunter2hunter2", "username": "redzed_mgr"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["username"] == "redzed_mgr"
+
+
+def test_a_taken_username_is_refused_so_the_form_can_ask_again(session, seed):
+    session.add(User(email="someone@else.com", username="taken_name", royalty_per_stream=0))
+    session.commit()
+    raw = _issue_invite(session, seed["writer_id"], "mgr2@example.com")
+    client = TestClient(_accept_app(session))
+    r = client.post(
+        "/portal/accept-invite",
+        json={"token": raw, "password": "hunter2hunter2", "username": "taken_name"},
+    )
+    assert r.status_code == 409
+    assert "taken" in r.json()["detail"]
 
 
 def test_invite_accept_creates_login_for_a_brand_new_email(session, seed):
@@ -226,52 +257,34 @@ def test_invite_accept_creates_login_for_a_brand_new_email(session, seed):
     assert session.query(User).filter(User.email == "newcomer@example.com").one()
 
 
-def test_signed_in_user_accepts_without_password(session, seed):
-    """Proof of ownership can also be an existing session — the only path open
-    to Google/OAuth accounts, which have no local password."""
-    from app.routers.portal import _mint_token
-
-    oauth_user = User(
-        email="google@example.com", username="googler",
-        hashed_password=None, royalty_per_stream=0,
-    )
-    session.add(oauth_user)
-    session.commit()
-
-    raw = _issue_invite(session, seed["writer_id"], "google@example.com")
+def test_being_signed_in_does_not_replace_the_password(session, seed):
+    """Proof-of-ownership used to let a signed-in user accept without typing a
+    password. There is nothing to prove now — the acceptance builds a new login
+    for this client — so a password is required either way."""
+    raw = _issue_invite(session, seed["writer_id"], "already@example.com")
     client = TestClient(_accept_app(session))
 
-    # no password and no session -> refused (nothing to verify against)
-    assert client.post("/portal/accept-invite", json={"token": raw}).status_code == 401
-
-    # signed in as that same email -> accepted
-    r = client.post(
-        "/portal/accept-invite",
-        json={"token": raw},
-        headers={"Authorization": f"Bearer {_mint_token(oauth_user)}"},
-    )
-    assert r.status_code == 200, r.text
-    assert r.json()["access_token"]
+    r = client.post("/portal/accept-invite", json={"token": raw})
+    assert r.status_code == 400
+    assert "password" in r.json()["detail"].lower()
 
 
-def test_someone_elses_session_does_not_accept_your_invite(session, seed):
-    """Being signed in as a DIFFERENT account is not proof of owning this one."""
-    from app.routers.auth import bcrypt_context
-    from app.routers.portal import _mint_token
-
-    victim = User(email="victim2@example.com", username="victim2",
-                  hashed_password=bcrypt_context.hash("pw"), royalty_per_stream=0)
-    attacker = User(email="attacker@example.com", username="attacker",
-                    hashed_password=bcrypt_context.hash("pw"), royalty_per_stream=0)
-    session.add_all([victim, attacker])
-    session.commit()
-
-    raw = _issue_invite(session, seed["writer_id"], "victim2@example.com")
+def test_one_link_claims_one_client_and_cannot_be_reused(session, seed):
+    """The link is good for the client it names, once. A second acceptance of
+    the same token is refused, so a forwarded link cannot quietly add a second
+    portal to anyone."""
+    raw = _issue_invite(session, seed["writer_id"], "once@example.com")
     client = TestClient(_accept_app(session))
 
-    r = client.post(
+    first = client.post(
         "/portal/accept-invite",
-        json={"token": raw},
-        headers={"Authorization": f"Bearer {_mint_token(attacker)}"},
+        json={"token": raw, "password": "hunter2hunter2", "username": "once_claim"},
     )
-    assert r.status_code == 401, r.text
+    assert first.status_code == 200
+    assert [w["name"] for w in first.json()["writers"]] == ["RedZed"]
+
+    again = client.post(
+        "/portal/accept-invite",
+        json={"token": raw, "password": "hunter2hunter2", "username": "once_claim_2"},
+    )
+    assert again.status_code == 400

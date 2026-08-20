@@ -10,6 +10,8 @@ identical.
 
 from decimal import Decimal
 
+from datetime import datetime
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -17,6 +19,7 @@ from fastapi.testclient import TestClient
 from app.database.session import get_session
 from app.models.models import User
 from app.models.statements import (
+    PortalInvite,
     BeneficiaryAccount, Catalog, Contact, Distribution, ParseStatus, Publisher,
     Statement, StatementBatch, StatementLine, Writer, WriterContact, WriterKind,
 )
@@ -41,7 +44,10 @@ def world(session):
     contact = Contact(email=EMAIL, user_id=user.id)
     session.add(contact)
     session.flush()
-    session.add(WriterContact(writer_id=writer.id, contact_id=contact.id))
+    session.add(WriterContact(writer_id=writer.id, contact_id=contact.id, user_id=user.id))
+    # live portal user: they are in because they accepted
+    session.add(PortalInvite(writer_id=writer.id, email=EMAIL, token_hash="granted-1",
+                             expires_at=datetime.now(), accepted_at=datetime.now()))
     acct = BeneficiaryAccount(writer_id=writer.id, account_code="C1", catalog=Catalog.YT)
     other_acct = BeneficiaryAccount(writer_id=other.id, account_code="C2", catalog=Catalog.YT)
     session.add_all([acct, other_acct])

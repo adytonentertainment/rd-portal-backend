@@ -10,6 +10,8 @@ reassigned, while the rightful owner saw nothing.
 
 from decimal import Decimal
 
+from datetime import datetime
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -17,6 +19,7 @@ from fastapi.testclient import TestClient
 from app.database.session import get_session
 from app.models.models import User
 from app.models.statements import (
+    PortalInvite,
     BeneficiaryAccount, Catalog, Contact, Distribution, ParseStatus, Publisher,
     Statement, StatementBatch, StatementLine, Writer, WriterContact, WriterKind,
 )
@@ -45,7 +48,10 @@ def world(session):
         c = Contact(email=email, user_id=u.id)
         session.add(c)
         session.flush()
-        session.add(WriterContact(writer_id=writer.id, contact_id=c.id))
+        session.add(WriterContact(writer_id=writer.id, contact_id=c.id, user_id=u.id))
+        session.add(PortalInvite(writer_id=writer.id, email=email,
+                                 token_hash=f"granted-{email}-{writer.id}",
+                                 expires_at=datetime.now(), accepted_at=datetime.now()))
         users[email] = u
 
     acct = BeneficiaryAccount(writer_id=old_w.id, account_code="C00190",

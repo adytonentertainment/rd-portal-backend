@@ -86,6 +86,9 @@ class BulkInviteRequest(BaseModel):
 class AcceptRequest(BaseModel):
     token: str
     password: Optional[str] = None
+    # The identity someone signs in with. Defaults to the client's name so a
+    # manager holding several portals can tell them apart at the login screen.
+    username: Optional[str] = None
 
 
 def _role(value: str) -> ContactRole:
@@ -103,6 +106,11 @@ def current_contact(
     contact = invite_svc.contact_for_user(db, user)
     if contact is None:
         raise HTTPException(status_code=403, detail="No portal access for this account")
+    # Which clients THIS login claimed, resolved once and carried on the
+    # instance so every scoped read below answers for the login rather than the
+    # address. One mailbox backs several logins now; the address alone cannot
+    # say which portal someone is standing in.
+    contact._claim_writer_ids = invite_svc.writer_ids_for_user(db, user)
     return contact
 
 
@@ -142,6 +150,11 @@ def _require_manage_access(db: Session, contact: Contact, writer_id: int) -> Wri
 
 
 def _require_writer_access(db: Session, contact: Contact, writer_id: int) -> Writer:
+    # A recorded contact is not an admitted one — see writer_ids_for_contact.
+    # The link says "this is how we reach the client"; an accepted invite is
+    # what says "this person may read the money".
+    if writer_id not in invite_svc.writer_ids_for_contact(db, contact):
+        raise HTTPException(status_code=404, detail="Writer not found")
     link = (
         db.query(WriterContact)
         .filter(WriterContact.writer_id == writer_id, WriterContact.contact_id == contact.id)
@@ -627,7 +640,7 @@ async def list_writer_members(
     return {
         "members": [
             {"email": c.email, "display_name": c.display_name, "role": wc.role.value,
-             "active": c.user_id is not None}
+             "active": wc.user_id is not None}
             for wc, c in members
         ],
         "pending_invites": pending,
@@ -850,9 +863,9 @@ async def admin_bulk_invite(
             skip(writer, writer_id, "no email on file")
             continue
 
-        # Someone on this catalog already signed in — inviting them again would
-        # mail an existing user a link to make an account they already have.
-        if any(contact.user_id is not None for _, contact in links):
+        # Somebody has claimed THIS client's portal. Asked of the link, because
+        # a manager who claimed another client still needs inviting to this one.
+        if any(link.user_id is not None for link, _ in links):
             skip(writer, writer_id, "portal already active")
             continue
 
@@ -929,17 +942,21 @@ async def preview_invite(token: str, db: Session = Depends(get_session)):
     if inv is None:
         raise HTTPException(status_code=404, detail="Invite is invalid, revoked, or expired")
     writer = db.get(Writer, inv.writer_id)
-    existing = db.query(User).filter(User.email == inv.email).first()
-    has_login = existing is not None
     return {
         "email": inv.email,
         "writer_name": writer.canonical_name if writer else None,
-        # A password is ALWAYS required now: a new one to create the login, or
-        # the existing account's password to prove ownership.
+        # Every claim makes its own login, so a password is always set here and
+        # never checked against an existing account.
         "needs_password": True,
-        "has_login": has_login,
-        # OAuth-only accounts have no password to type — they must sign in first.
-        "requires_sign_in": bool(has_login and not existing.hashed_password),
+        # What the username field starts as: the client's name, free to edit.
+        # Identity is per client, so the same address claiming a second portal
+        # picks a second username rather than reusing the first.
+        "suggested_username": invite_svc.suggested_username(
+            db, writer.canonical_name if writer else inv.email
+        ),
+        # Kept for older clients; a prior login no longer changes this flow.
+        "has_login": False,
+        "requires_sign_in": False,
     }
 
 
@@ -976,16 +993,21 @@ async def accept_invite(
             body.password,
             bcrypt_context,
             authenticated_email=_authenticated_email(request),
+            username=body.username,
         )
+    except invite_svc.UsernameTaken as e:
+        # 409 so the form can ask for another without treating it as a failure.
+        raise HTTPException(status_code=409, detail=str(e))
     except invite_svc.InviteAuthRequired as e:
         raise HTTPException(status_code=401, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    writer_ids = invite_svc.writer_ids_for_contact(db, contact)
+    writer_ids = invite_svc.writer_ids_for_user(db, user)
     writers = db.query(Writer).filter(Writer.id.in_(writer_ids or [0])).all()
     return {
         "access_token": _mint_token(user),
         "token_type": "bearer",
         "email": contact.email,
+        "username": user.username,
         "writers": [_writer_card(db, w, contact) for w in writers],
     }

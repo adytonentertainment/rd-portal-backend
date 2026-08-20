@@ -25,7 +25,12 @@ class User(Base):
     __tablename__ = "User"
 
     id = Column(Integer, primary_key=True)
-    email = Column(String, index=True, nullable=False, unique=True)
+    # NOT unique: one mailbox can hold several portal logins, one per client.
+    # A manager who represents three writers claims three portals from the same
+    # inbox, each with its own username and password, so that opening one never
+    # exposes the others. `username` is the unique identity — see
+    # portal.accept_invite.
+    email = Column(String, index=True, nullable=False)
     username = Column(String, nullable=False, unique=True)
 
     # users who log in with a service will not have a password

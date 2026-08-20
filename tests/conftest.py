@@ -51,3 +51,31 @@ def no_real_email(session, monkeypatch):
     monkeypatch.setattr(invite_delivery, "SessionLocal", lambda: session)
     monkeypatch.setattr(invite_delivery, "EMail", _NullMailer)
     monkeypatch.setattr(session, "close", lambda: None)
+
+
+@pytest.fixture()
+def grant_access(session):
+    """Give a contact real portal access to a writer, the way production does.
+
+    Being LINKED to a writer only means the client is contactable — an admin
+    can record an email without inviting anyone. Access is granted by accepting
+    an invite, so a fixture standing in for a live portal user has to record
+    that acceptance too, or it is describing a state the app never produces.
+    """
+    from datetime import datetime
+
+    from app.models.statements import PortalInvite
+
+    def _grant(writer_id, email, accepted_at=None):
+        invite = PortalInvite(
+            writer_id=writer_id,
+            email=email,
+            token_hash=f"test-{writer_id}-{email}",
+            expires_at=datetime.now(),
+            accepted_at=accepted_at or datetime.now(),
+        )
+        session.add(invite)
+        session.flush()
+        return invite
+
+    return _grant

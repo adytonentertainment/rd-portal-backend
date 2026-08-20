@@ -12,6 +12,8 @@ from fastapi.testclient import TestClient
 
 from app.database.session import get_session
 from app.models.models import User
+from datetime import datetime
+
 from app.models.statements import (
     Contact,
     ContactRole,
@@ -43,7 +45,12 @@ def world(session):
         c = Contact(email=email, user_id=u.id)
         session.add(c)
         session.flush()
-        session.add(WriterContact(writer_id=w.id, contact_id=c.id, role=role))
+        session.add(WriterContact(writer_id=w.id, contact_id=c.id, role=role, user_id=u.id))
+        # These two are live portal users, so they got in by accepting.
+        session.add(PortalInvite(writer_id=w.id, email=email,
+                                 token_hash=f"granted-{email}",
+                                 expires_at=datetime.now(),
+                                 accepted_at=datetime.now()))
         people[role.value] = u
     session.commit()
     return {"writer": w, "primary": people["primary"], "guest": people["manager"]}
@@ -139,3 +146,43 @@ def test_a_stranger_still_sees_nothing(client, session, world):
     session.commit()
     client.login_as(outsider)
     assert client.get("/me/writers").status_code == 403
+
+
+def test_recording_a_contact_email_does_not_admit_them(session, client, world):
+    """THE bug: paste an address that already runs one client's portal into a
+    SECOND client's contact field, and that second client read "Portal active"
+    while the person could open statements nobody had invited them to.
+
+    Recording a contact says how to reach a client. It does not say who may
+    read their money. 148 contacts on the real roster are linked to more than
+    one writer, so this was the normal shape of the data, not a corner case.
+    """
+    from app.models.statements import Publisher, WriterKind
+    from app.routers.writers_admin import _portal_status_for
+    from app.services.portal import invites as invite_svc
+
+    pub = session.query(Publisher).first()
+    second = Writer(publisher_id=pub.id, canonical_name="A Different Client",
+                    kind=WriterKind.CLIENT)
+    session.add(second)
+    session.flush()
+
+    # the manager already runs the first client's portal; an admin now records
+    # their address on the second client — no invite sent
+    manager_contact = (
+        session.query(Contact).filter(Contact.email == "manager@x.com").one()
+    )
+    session.add(WriterContact(writer_id=second.id, contact_id=manager_contact.id,
+                              role=ContactRole.MANAGER))
+    session.commit()
+
+    # the roster badge answers for THIS client: nobody was invited here
+    invites = session.query(PortalInvite).filter(PortalInvite.writer_id == second.id).all()
+    links = [(None, manager_contact)]
+    assert _portal_status_for(links, invites) == "none"
+
+    # and the link alone does not let them read it
+    assert second.id not in invite_svc.writer_ids_for_contact(session, manager_contact)
+    client.login_as(world["guest"])
+    assert client.get(f"/me/writers/{second.id}/members").status_code == 404
+    assert [w["name"] for w in client.get("/me/writers").json()] == ["Amenazzy"]

@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.statements import (
@@ -250,14 +251,40 @@ def pair_names_to_emails(emails, names):
 
 def _get_or_create_contact(db: Session, email: str, name: Optional[str],
                            lang: Optional[str]):
-    """Returns (contact, created)."""
+    """Returns (contact, created).
+
+    Look-then-insert is a race, and this one bit for real: an import of 888 rows
+    died on `duplicate key value violates unique constraint "ix_contact_email"`
+    for an address the SELECT had just reported missing. Between the two
+    statements another transaction — a second import, or the same one submitted
+    twice — committed that contact. Under READ COMMITTED our snapshot could not
+    see it, so the insert was the first time we heard about it.
+
+    132 addresses are shared across writers, so the same contact is reached from
+    many rows and the window is hit often rather than rarely.
+
+    The insert therefore runs inside a SAVEPOINT. Without one, the failed
+    statement poisons the whole transaction and every remaining row of the
+    import dies with it: one duplicated address cost all 888. With one, losing
+    the race just means the other side created it, which is the result we
+    wanted anyway — so re-read it and carry on.
+    """
     contact = db.query(Contact).filter(Contact.email == email).first()
-    if contact is None:
-        contact = Contact(email=email, display_name=name, preferred_language=lang)
-        db.add(contact)
-        db.flush()
+    if contact is not None:
+        return contact, False
+    try:
+        with db.begin_nested():
+            contact = Contact(email=email, display_name=name, preferred_language=lang)
+            db.add(contact)
+            db.flush()
         return contact, True
-    return contact, False
+    except IntegrityError:
+        # The savepoint rolled back, the outer transaction is intact, and the
+        # winner's row is now visible.
+        contact = db.query(Contact).filter(Contact.email == email).first()
+        if contact is None:
+            raise
+        return contact, False
 
 
 def _resolve_publisher_id(db: Session, account_codes: List[str]) -> Optional[int]:

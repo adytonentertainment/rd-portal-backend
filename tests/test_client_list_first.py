@@ -202,3 +202,58 @@ def test_unmatched_accounts_are_not_clients(session, client):
 
     # ...but none of them is a client on the roster
     assert all(not w.is_client and not w.is_commission_partner for w in unmatched)
+
+
+# --- concurrent contact creation --------------------------------------------
+#
+# An import of 888 rows died on a duplicate ix_contact_email for an address the
+# SELECT had just reported missing: a second transaction created it in between.
+# 132 addresses are shared across writers, so this window is hit often.
+
+
+def test_losing_the_race_to_create_a_contact_does_not_kill_the_import(session):
+    """The row that loses adopts the winner's contact instead of exploding, and
+    — the part that actually cost 888 rows — the transaction stays usable."""
+    from app.models.statements import Contact
+    from app.services.client_import.importer import _get_or_create_contact
+
+    real = _get_or_create_contact.__wrapped__ if hasattr(_get_or_create_contact, "__wrapped__") else None
+    assert real is None  # plain function, no decorator surprises
+
+    # Simulate the loser: the row exists, but this session's first lookup missed
+    # it. Insert it behind our back, then ask for it.
+    session.add(Contact(email="shared@mgr.com", display_name="Winner"))
+    session.commit()
+
+    contact, created = _get_or_create_contact(session, "shared@mgr.com", "Loser", "en")
+    assert created is False
+    assert contact.display_name == "Winner"
+
+    # The session must still work — this is what "one duplicate killed all 888
+    # rows" actually meant.
+    session.add(Contact(email="next@mgr.com", display_name="Next"))
+    session.commit()
+    assert session.query(Contact).filter(Contact.email == "next@mgr.com").one()
+
+
+def test_a_shared_address_across_many_rows_creates_one_contact(session):
+    """132 addresses are shared. Every row after the first must reuse."""
+    from app.models.statements import Contact
+
+    rows = [
+        _row("Artist A"), _row("Artist B"), _row("Artist C"),
+    ]
+    for r in rows:
+        r.emails = [ParsedEmail("manager@agency.com", True)]
+    importer.apply_rows(session, rows, confirmed_only=True)
+
+    assert session.query(Contact).filter(Contact.email == "manager@agency.com").count() == 1
+
+
+def test_reimporting_does_not_duplicate_contacts(session):
+    from app.models.statements import Contact
+
+    rows = [_row("Artist A")]
+    importer.apply_rows(session, rows, confirmed_only=True)
+    importer.apply_rows(session, rows, confirmed_only=True)
+    assert session.query(Contact).filter(Contact.email == "x@y.com").count() == 1

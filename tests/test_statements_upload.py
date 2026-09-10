@@ -131,3 +131,75 @@ def test_router_registered_in_api_router():
     paths = {route.path for route in api_router.routes}
     assert "/admin/statements/uploads" in paths
     assert "/admin/statements/uploads/{upload_id}" in paths
+
+
+# --- cancelling a transfer that died mid-drop -------------------------------
+#
+# A browser that dies mid-upload leaves the row `receiving`, and every publish
+# is blocked while any upload is non-terminal. Without a way to say "that one is
+# over", one dead tab holds distribution for the full thirty-minute stale sweep.
+
+
+def _open_upload(client, names=("a.pdf", "b.pdf")):
+    r = client.post(
+        "/admin/statements/uploads?finalize=false",
+        json={"files": [{"name": n, "size": 10} for n in names]},
+    )
+    assert r.status_code == 202, r.text
+    return r.json()["upload_id"]
+
+
+def test_cancel_marks_a_stuck_upload_failed(client, session):
+    upload_id = _open_upload(client)
+    client.post(f"/admin/statements/uploads/{upload_id}/files", files=[("files", ("a.pdf", b"x" * 10))])
+
+    r = client.post(f"/admin/statements/uploads/{upload_id}/cancel")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == UploadStatus.FAILED.value
+    assert body["already_terminal"] is False
+
+    session.expire_all()
+    upload = session.get(StatementUpload, upload_id)
+    assert upload.status == UploadStatus.FAILED
+    # no longer receiving -> no longer blocks publishing
+    assert upload.stats.get("receiving") is False
+    assert "cancelled" in (upload.stats.get("error") or "").lower()
+
+
+def test_cancel_keeps_the_files_that_already_arrived(client, session):
+    """Cancelling abandons the transfer, not the bytes: a resend of the period
+    supersedes it, but silently binning received royalty files would be worse
+    than the stall."""
+    upload_id = _open_upload(client)
+    client.post(f"/admin/statements/uploads/{upload_id}/files", files=[("files", ("a.pdf", b"x" * 10))])
+    session.expire_all()
+    before = session.get(StatementUpload, upload_id).file_count
+    assert before == 1
+
+    client.post(f"/admin/statements/uploads/{upload_id}/cancel")
+    session.expire_all()
+    assert session.get(StatementUpload, upload_id).file_count == before
+
+
+def test_cancel_never_releases_a_partial_drop_to_the_pipeline(client, session):
+    """The dangerous mistake would be treating cancel as finalize. A half
+    received period marked DONE would be distributed as though complete."""
+    upload_id = _open_upload(client, names=("a.pdf", "b.pdf", "c.pdf"))
+    client.post(f"/admin/statements/uploads/{upload_id}/files", files=[("files", ("a.pdf", b"x" * 10))])
+    client.post(f"/admin/statements/uploads/{upload_id}/cancel")
+    session.expire_all()
+    assert session.get(StatementUpload, upload_id).status is UploadStatus.FAILED
+
+
+def test_cancel_is_idempotent(client):
+    upload_id = _open_upload(client)
+    client.post(f"/admin/statements/uploads/{upload_id}/files", files=[("files", ("a.pdf", b"x" * 10))])
+    assert client.post(f"/admin/statements/uploads/{upload_id}/cancel").status_code == 200
+    second = client.post(f"/admin/statements/uploads/{upload_id}/cancel")
+    assert second.status_code == 200
+    assert second.json()["already_terminal"] is True
+
+
+def test_cancel_unknown_upload_is_404(client):
+    assert client.post("/admin/statements/uploads/999999/cancel").status_code == 404

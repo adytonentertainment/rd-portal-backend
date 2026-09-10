@@ -296,6 +296,60 @@ async def add_statement_upload_files(
     }
 
 
+@statements_admin_router.post("/uploads/{upload_id}/cancel", status_code=200)
+async def cancel_statement_upload(
+    upload_id: int,
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_session),
+):
+    """Give up on an upload that is no longer being transferred.
+
+    An upload whose browser died mid-drop stays `receiving` until the worker's
+    stale sweep notices, thirty minutes after the last batch. That wait is not
+    harmless: `assert_no_ingest_in_flight` blocks every publish while any upload
+    is non-terminal, so one dead tab holds all distribution hostage for half an
+    hour, and the admin has no way to say "that one is over, move on".
+
+    The files already received stay on disk and stay counted. This marks the
+    transfer finished-as-failed, it does not discard anything — a later upload
+    of the same period supersedes it, and the reclaim pass handles the bytes.
+    Deliberately NOT a finalize: a half-received drop must never be released to
+    the pipeline as though it were a complete royalty period.
+    """
+    upload = db.get(StatementUpload, upload_id, with_for_update=True)
+    if upload is None:
+        raise HTTPException(status_code=404, detail="Upload not found")
+    if upload.status in (UploadStatus.DONE, UploadStatus.FAILED):
+        return {
+            "upload_id": upload.id,
+            "status": upload.status.value,
+            "file_count": upload.file_count,
+            "already_terminal": True,
+        }
+
+    stats = dict(upload.stats or {})
+    stats["receiving"] = False
+    stats["error"] = (
+        f"Upload cancelled by an admin after the transfer stopped. "
+        f"{upload.file_count} file(s) had arrived and are kept on disk."
+    )
+    stats["cancelled_by"] = user.id
+    stats["cancelled_at"] = datetime.now().isoformat()
+    upload.stats = stats
+    upload.status = UploadStatus.FAILED
+    db.commit()
+    logger.warning(
+        f"Statement upload {upload.id} cancelled by admin {user.id}; "
+        f"{upload.file_count} file(s) retained"
+    )
+    return {
+        "upload_id": upload.id,
+        "status": upload.status.value,
+        "file_count": upload.file_count,
+        "already_terminal": False,
+    }
+
+
 @statements_admin_router.post("/uploads/{upload_id}/finalize", status_code=202)
 async def finalize_statement_upload(
     upload_id: int,

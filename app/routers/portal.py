@@ -942,21 +942,25 @@ async def preview_invite(token: str, db: Session = Depends(get_session)):
     if inv is None:
         raise HTTPException(status_code=404, detail="Invite is invalid, revoked, or expired")
     writer = db.get(Writer, inv.writer_id)
+    # One login per address. If this mailbox already has one, this invite ADDS a
+    # client to it, so the form asks for that account's existing password rather
+    # than setting up a new login — and offers no username, because the account
+    # already has one.
+    existing = db.query(User).filter(User.email == inv.email).first()
+    has_login = existing is not None
     return {
         "email": inv.email,
         "writer_name": writer.canonical_name if writer else None,
-        # Every claim makes its own login, so a password is always set here and
-        # never checked against an existing account.
         "needs_password": True,
-        # What the username field starts as: the client's name, free to edit.
-        # Identity is per client, so the same address claiming a second portal
-        # picks a second username rather than reusing the first.
-        "suggested_username": invite_svc.suggested_username(
-            db, writer.canonical_name if writer else inv.email
+        "has_login": has_login,
+        # Only meaningful on a first claim; ignored once a login exists.
+        "suggested_username": (
+            None if has_login
+            else invite_svc.suggested_username(db, writer.canonical_name if writer else inv.email)
         ),
-        # Kept for older clients; a prior login no longer changes this flow.
-        "has_login": False,
-        "requires_sign_in": False,
+        # An OAuth-only account has no password to type, so the only proof it
+        # can offer is being signed in already.
+        "requires_sign_in": bool(has_login and not existing.hashed_password),
     }
 
 

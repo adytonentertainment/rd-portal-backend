@@ -120,12 +120,12 @@ def test_accepting_one_client_does_not_open_the_other(client, session, two_write
     assert inv_b.accepted_at is None
 
 
-def test_the_second_client_is_a_separate_login(client, session, two_writers, sent_emails):
-    """One inbox, two clients, two logins — the whole point of the change.
+def test_one_login_holds_both_clients_and_can_switch(client, session, two_writers, sent_emails):
+    """One inbox, one login, both clients on it.
 
-    The manager claims each portal with its own username and password. Signing
-    into one shows that client alone; there is no single account holding both,
-    so no screen ever puts one client's royalties next to another's.
+    Somebody who is a client for their own catalog and a commission partner on
+    someone else's signs in once and switches between them, rather than keeping
+    two sets of credentials for the same inbox.
     """
     a, b = two_writers
     tok_a = client.post(f"/admin/writers/{a.id}/invites",
@@ -134,24 +134,22 @@ def test_the_second_client_is_a_separate_login(client, session, two_writers, sen
                         json={"email": SHARED, "role": "manager"}).json()["token"]
 
     first = client.post("/portal/accept-invite", json={
-        "token": tok_a, "password": "amenazzy-pass-1", "username": "amenazzy_mgr"})
-    second = client.post("/portal/accept-invite", json={
-        "token": tok_b, "password": "canserbero-pass-2", "username": "canserbero_mgr"})
-    assert first.status_code == 200 and second.status_code == 200, second.text
-
-    # two distinct logins behind one address
-    users = session.query(User).filter(User.email == SHARED).all()
-    assert {u.username for u in users} == {"amenazzy_mgr", "canserbero_mgr"}
-    assert len(users) == 2
-
-    # each one reaches exactly its own client
-    by_name = {u.username: u for u in users}
-    assert invite_svc.writer_ids_for_user(session, by_name["amenazzy_mgr"]) == [a.id]
-    assert invite_svc.writer_ids_for_user(session, by_name["canserbero_mgr"]) == [b.id]
-
-    # and each session lists only that client
+        "token": tok_a, "password": "one-password", "username": "label_mgr"})
+    assert first.status_code == 200, first.text
     assert [w["name"] for w in first.json()["writers"]] == ["Amenazzy"]
-    assert [w["name"] for w in second.json()["writers"]] == ["Canserbero"]
+
+    # the second needs the SAME password: proof, not a new account
+    assert client.post("/portal/accept-invite", json={"token": tok_b}).status_code == 401
+    second = client.post("/portal/accept-invite", json={
+        "token": tok_b, "password": "one-password"})
+    assert second.status_code == 200, second.text
+
+    users = session.query(User).filter(User.email == SHARED).all()
+    assert len(users) == 1, "one address should hold one login"
+
+    # and that single login now reaches both, which is what the switcher offers
+    assert invite_svc.writer_ids_for_user(session, users[0]) == sorted([a.id, b.id])
+    assert sorted(w["name"] for w in second.json()["writers"]) == ["Amenazzy", "Canserbero"]
 
 
 def test_the_claim_form_offers_the_client_name_as_the_username(client, session, two_writers):

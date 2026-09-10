@@ -77,7 +77,10 @@ def compute_gate(db: Session, batch_id: int) -> Dict:
     unmatched_names, missing_info_names = [], []
 
     for stmt, acct, writer in rows:
-        if writer.is_house_account:
+        if writer.is_house_account or writer.publisher_owned:
+            # The publisher's own books, or a catalog they acquired. Both are
+            # theirs already: there is no portal to publish to, and neither is
+            # a blocker to fix.
             house += 1
             continue
         if writer.status == WriterStatus.OFFBOARDED:

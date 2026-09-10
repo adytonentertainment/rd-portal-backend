@@ -164,6 +164,20 @@ class Writer(Base):
     expected_catalogs = Column(JSON, nullable=True)
     cadence = Column(Enum(Cadence), nullable=True)
     is_house_account = Column(Boolean, nullable=False, default=False)
+    # An ACQUIRED catalog. The writer sold this catalog to the publisher, so the
+    # entry keeps their name for accounting and history while the money is the
+    # publisher's. They must not see it: not in their portal, not in the account
+    # switcher, and they can never be invited to it.
+    #
+    # Distinct from is_house_account, which is the publisher's OWN books
+    # (CPJ001, CS0001). These are reported separately, per writer, which is why
+    # reusing that flag would have lost information.
+    publisher_owned = Column(Boolean, nullable=False, default=False)
+    # Signed, but nothing has been reported for them yet. A client who joined
+    # after the last statement run has no statements and never should — that is
+    # a normal state, not an omission, and flagging it as one buries the clients
+    # who ARE missing something under a list nobody can act on.
+    awaiting_first_statement = Column(Boolean, nullable=False, default=False)
     # Roster membership, straight from the client list's two sheets. `kind` can
     # only hold ONE value, but the same person legitimately appears on both
     # sheets (a client for their own works, a commission partner on others'),

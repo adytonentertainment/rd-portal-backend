@@ -37,6 +37,7 @@ from app.models.statements import (
     PortalInvite,
     Publisher,
     Statement,
+    StatementLine,
     StatementBatch,
     Writer,
     WriterAlias,
@@ -78,6 +79,12 @@ class WriterUpdate(BaseModel):
     canonical_name: Optional[str] = None
     payee_name: Optional[str] = None
     kind: Optional[str] = None
+    # An acquired catalog: kept on the roster under the writer's name for
+    # accounting, but the money is the publisher's and the writer cannot see it.
+    publisher_owned: Optional[bool] = None
+    # Signed, nothing reported yet. Stops them being counted as a client whose
+    # statements are missing.
+    awaiting_first_statement: Optional[bool] = None
     expected_catalogs: Optional[List[str]] = None
     preferred_language: Optional[str] = None
     cadence: Optional[str] = None
@@ -262,11 +269,16 @@ def _serialize_list_row(w: Writer, links, invites, account_count: int, coverage=
         "preferred_language": w.preferred_language,
         "expected_catalogs": w.expected_catalogs or [],
         "is_house_account": w.is_house_account,
+        # Acquired catalog — on the roster, but never in the writer's portal.
+        "publisher_owned": w.publisher_owned,
         # baseline client-list fields still missing (empty list = fully set up)
         "missing_info": _missing_info(w),
         "needs_info": bool(_missing_info(w)),
         # on the roster but no statement at all — a distribution blocker
+        # Factual: they hold no statements. Whether that is a PROBLEM is the
+        # next field's job — a newly signed client has none and should not.
         "no_statements": (cov or {}).get("statements", 0) == 0 and not w.is_house_account,
+        "awaiting_first_statement": w.awaiting_first_statement,
         # a statement account no client-list row claims — resolve, don't fill in
         "is_unmatched": w.kind is None and not w.is_house_account,
         # For an unmatched row: the name printed on the statement filename (the
@@ -394,7 +406,12 @@ async def list_writers(
                 Writer.kind.is_(None),
                 Writer.expected_catalogs.is_(None),
                 Writer.cadence.is_(None),
-                Writer.id.notin_(writers_with_statements),
+                and_(
+                    Writer.id.notin_(writers_with_statements),
+                    # Signed after the last run: nothing is missing, so nothing
+                    # to attend to.
+                    Writer.awaiting_first_statement.is_(False),
+                ),
             ),
         )
 
@@ -699,6 +716,8 @@ async def roster_summary(
     for w in active_q.order_by(func.lower(Writer.canonical_name)).all():
         if w.id in writers_with_statements:
             continue
+        if w.awaiting_first_statement:
+            continue  # signed after the last run — nothing is missing
         twin = by_base.get(_base(w.canonical_name)) or (
             by_payee.get(normalize_name(w.payee_name)) if w.payee_name else None
         )
@@ -812,6 +831,7 @@ async def distribute_all(
             Writer.status == WriterStatus.ACTIVE,
             Writer.is_house_account.is_(False),
             Writer.kind.isnot(None),
+            Writer.awaiting_first_statement.is_(False),
             Writer.id.notin_(with_statements or [0]),
         )
         .count()
@@ -888,6 +908,13 @@ async def get_writer(
         .order_by(Statement.period_code.desc())
         .all()
     )
+    published_statement_ids = {
+        row[0]
+        for row in db.query(Distribution.statement_id).filter(
+            Distribution.writer_id == writer_id,
+            Distribution.portal_visible.is_(True),
+        )
+    }
     statements = []
     for stmt, account_code in stmt_rows:
         pdf_present = bool(stmt.pdf_path)
@@ -898,6 +925,10 @@ async def get_writer(
         amount = stmt.detail_sum if stmt.detail_sum is not None else stmt.payable
         statements.append({
             "statement_id": stmt.id,
+            # Live in the client's portal right now. Deleting one of these takes
+            # it back from somebody who can already read it, so the UI has to be
+            # able to say so before asking.
+            "distributed": stmt.id in published_statement_ids,
             "account_code": account_code,
             "period_code": stmt.period_code,
             "catalog": stmt.batch.catalog.value if stmt.batch else None,
@@ -914,6 +945,7 @@ async def get_writer(
         "canonical_name": w.canonical_name,
         "payee_name": w.payee_name,
         "kind": w.kind.value if w.kind else None,
+        "publisher_owned": w.publisher_owned,
         "status": w.status.value if w.status else None,
         "cadence": w.cadence.value if w.cadence else None,
         "preferred_language": w.preferred_language,
@@ -1058,6 +1090,10 @@ async def update_writer(
         w.payee_name = (body.payee_name or None)
     if "kind" in fields:
         w.kind = _parse_kind(body.kind)
+    if "publisher_owned" in fields:
+        w.publisher_owned = bool(body.publisher_owned)
+    if "awaiting_first_statement" in fields:
+        w.awaiting_first_statement = bool(body.awaiting_first_statement)
     if "expected_catalogs" in fields:
         w.expected_catalogs = _parse_catalogs(body.expected_catalogs)
     if "preferred_language" in fields:
@@ -1201,6 +1237,201 @@ async def assign_unmatched_to_client(
         "assigned_to": {"id": target.id, "name": target.canonical_name},
         "account_codes": moved,
         "alias_recorded": orphan_name,
+    }
+
+
+class MoveAccountRequest(BaseModel):
+    target_writer_id: int
+
+
+@writers_admin_router.post("/{writer_id}/accounts/{account_id}/move")
+async def move_account(
+    writer_id: int,
+    account_id: int,
+    body: MoveAccountRequest,
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_session),
+):
+    """Move one beneficiary account, and every statement under it, to another
+    client.
+
+    This is the correction the roster could not previously express. Two clients
+    share a name and the statements landed on the wrong one; a person's catalog
+    and their commission statements arrived on a single entry and have to be
+    split; a re-issued account code attached itself to the old row. All of it is
+    the same operation: this account belongs to somebody else.
+
+    Re-pointing the account is the whole change. Portal reads resolve ownership
+    through the account's CURRENT writer, so the new owner sees the statements
+    immediately and the previous one stops seeing them — no historical rows are
+    rewritten. Distribution records keep the writer they were published to,
+    because that is an audit fact about what was sent, not a claim about who
+    owns the account today.
+
+    Refused when it would be a guess rather than a correction:
+      * an account that is not actually on this client,
+      * a target that does not exist or has been offboarded,
+      * moving an account onto the client it is already on.
+
+    ALLOWED even when statements have already been distributed — that is the
+    common case for a mis-filed account, and it is exactly what needs fixing.
+    The response says how many were affected so the caller can tell the admin
+    what just changed hands rather than leaving them to find out.
+    """
+    _get_writer_or_404(db, writer_id)
+    account = db.get(BeneficiaryAccount, account_id)
+    if account is None or account.writer_id != writer_id:
+        raise HTTPException(status_code=404, detail="Account not found on this client")
+
+    target = db.get(Writer, body.target_writer_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Target client not found")
+    if target.id == writer_id:
+        raise HTTPException(status_code=422, detail="That account is already on this client")
+    if target.status == WriterStatus.OFFBOARDED:
+        raise HTTPException(
+            status_code=409, detail="Cannot move an account onto an offboarded client"
+        )
+
+    statement_count = (
+        db.query(Statement.id).filter(Statement.account_id == account.id).count()
+    )
+    distributed = (
+        db.query(Distribution.id)
+        .join(Statement, Distribution.statement_id == Statement.id)
+        .filter(Statement.account_id == account.id)
+        .count()
+    )
+
+    source_name = db.get(Writer, writer_id).canonical_name
+    # Assign through the relationship so both sides' collections stay honest.
+    account.writer = target
+
+    # Remember the name this account files under, so the next client-list import
+    # recognises it instead of creating an orphan for it again.
+    filed_as = account.display_name
+    if filed_as and filed_as != target.canonical_name:
+        exists = (
+            db.query(WriterAlias)
+            .filter(WriterAlias.writer_id == target.id, WriterAlias.alias_name == filed_as)
+            .first()
+        )
+        if exists is None:
+            db.add(WriterAlias(writer_id=target.id, alias_name=filed_as,
+                               source=AliasSource.MANUAL))
+
+    db.commit()
+    logger.info(
+        f"admin {user.id} moved account {account.account_code} "
+        f"({statement_count} statements, {distributed} distributed) "
+        f"from writer {writer_id} '{source_name}' to {target.id} '{target.canonical_name}'"
+    )
+    return {
+        "account_code": account.account_code,
+        "from": {"id": writer_id, "name": source_name},
+        "to": {"id": target.id, "name": target.canonical_name},
+        "statements_moved": statement_count,
+        "distributed_statements_affected": distributed,
+    }
+
+
+@writers_admin_router.post("/{writer_id}/distribute")
+async def distribute_to_writer(
+    writer_id: int,
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_session),
+):
+    """Send one client their statements, on request.
+
+    A batch send is gated on the whole batch being clean, which is right when
+    publishing hundreds at once: an unresolved account would be silently
+    dropped. It is the wrong answer when a single client rings up asking where
+    their statement is — somebody else's unmatched account is not their problem
+    and should not make them wait.
+
+    So this publishes just this client, with the same cadence de-duplication and
+    supersede rules a batch send uses. It still refuses when the CLIENT is the
+    thing that is unresolved, and says which reason, because that is a fix
+    rather than a wait.
+    """
+    from app.services.distribution.publish import WriterNotSendable, distribute_writer
+
+    try:
+        result = distribute_writer(db, writer_id, published_by=user.id)
+    except WriterNotSendable as e:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "writer_not_sendable", "reasons": e.reasons},
+        )
+    logger.info(
+        f"admin {user.id} sent {result['published']} statement(s) to writer "
+        f"{writer_id} '{result['writer_name']}' on request"
+    )
+    return result
+
+
+@writers_admin_router.delete("/{writer_id}/statements/{statement_id}")
+async def delete_writer_statement(
+    writer_id: int,
+    statement_id: int,
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_session),
+):
+    """Delete ONE statement from a client, with its line detail.
+
+    Needed because the only delete that existed was all-or-nothing. A statement
+    can arrive wrong — a duplicate of one already ingested, filed against the
+    wrong period, parsed from a file the back office later reissued — and until
+    now the only way to remove it was to wipe the database and start again.
+
+    If it has already been published, the distribution goes with it and the
+    client stops seeing it. That is the point rather than a side effect, so the
+    response says how many published copies were withdrawn and the log records
+    it: this is the one action here that takes something away from a client who
+    could already read it.
+
+    The stored FILE is left alone. It is the evidence of what was delivered, it
+    is shared with the re-ingest path, and removing it would mean a re-upload
+    could not restore what this just deleted.
+    """
+    _get_writer_or_404(db, writer_id)
+
+    stmt = (
+        db.query(Statement)
+        .join(BeneficiaryAccount, Statement.account_id == BeneficiaryAccount.id)
+        .filter(Statement.id == statement_id, BeneficiaryAccount.writer_id == writer_id)
+        .first()
+    )
+    if stmt is None:
+        raise HTTPException(status_code=404, detail="Statement not found on this client")
+
+    account_code = db.get(BeneficiaryAccount, stmt.account_id).account_code
+    period = stmt.period_code
+
+    published = (
+        db.query(Distribution)
+        .filter(Distribution.statement_id == stmt.id, Distribution.portal_visible.is_(True))
+        .count()
+    )
+    lines = db.query(StatementLine).filter(
+        StatementLine.statement_id == stmt.id
+    ).delete(synchronize_session=False)
+    db.query(Distribution).filter(Distribution.statement_id == stmt.id).delete(
+        synchronize_session=False
+    )
+    db.delete(stmt)
+    db.commit()
+
+    logger.warning(
+        f"admin {user.id} deleted statement {statement_id} ({account_code} {period}) "
+        f"from writer {writer_id}: {lines} lines, {published} published copy(ies) withdrawn"
+    )
+    return {
+        "statement_id": statement_id,
+        "account_code": account_code,
+        "period_code": period,
+        "lines_deleted": lines,
+        "withdrawn_from_portal": published,
     }
 
 

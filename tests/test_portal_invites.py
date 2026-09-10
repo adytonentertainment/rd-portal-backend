@@ -167,17 +167,17 @@ def _issue_invite(session, writer_id, email):
     return raw
 
 
-def test_invite_link_never_touches_an_existing_account(session, seed):
-    """THE takeover, under the per-client identity model.
+def test_invite_link_alone_cannot_act_as_an_existing_account(session, seed):
+    """THE takeover.
 
-    Holding a link for an address that already has a login must never mint a
-    session as that login. It cannot any more, by construction: every
-    acceptance creates its OWN account for the client it names, so a forwarded
-    link (or one read out of a log) yields a fresh, empty portal for that one
-    client — never control of somebody's existing account, and never their
-    other clients.
+    One address has one login, so accepting a second invite ADDS a client to an
+    account that already exists. That is exactly why the link cannot be enough
+    on its own: anyone forwarded it (or reading it out of a log) would otherwise
+    attach themselves to somebody's account and see their royalties. Proof of
+    the account is required first.
     """
     from app.routers.auth import bcrypt_context
+    from app.services.portal import invites as invite_svc
 
     victim = User(
         email="victim@example.com",
@@ -191,28 +191,30 @@ def test_invite_link_never_touches_an_existing_account(session, seed):
     raw = _issue_invite(session, seed["writer_id"], "victim@example.com")
     client = TestClient(_accept_app(session))
 
-    # a password is always required — it creates the new login
+    # no password -> refused, nothing granted
     r = client.post("/portal/accept-invite", json={"token": raw})
-    assert r.status_code == 400, r.text
+    assert r.status_code == 401, r.text
     assert "access_token" not in r.json()
 
+    # wrong password -> refused
+    r = client.post("/portal/accept-invite", json={"token": raw, "password": "guess"})
+    assert r.status_code == 401, r.text
+    assert invite_svc.writer_ids_for_user(session, victim) == []
+
+    # the invite is still unaccepted and no link was made
+    from app.models.statements import PortalInvite
+
+    inv = session.query(PortalInvite).filter(PortalInvite.email == "victim@example.com").one()
+    assert inv.accepted_at is None
+    assert session.query(WriterContact).count() == 0
+
+    # correct password -> the client is added to the SAME login
     r = client.post(
-        "/portal/accept-invite",
-        json={"token": raw, "password": "a-new-password", "username": "victim_amenazzy"},
+        "/portal/accept-invite", json={"token": raw, "password": "the-real-password"}
     )
     assert r.status_code == 200, r.text
-
-    # a SEPARATE account was created; the victim's own login is untouched
-    minted = session.query(User).filter(User.username == "victim_amenazzy").one()
-    assert minted.id != victim.id
-    session.refresh(victim)
-    assert bcrypt_context.verify("the-real-password", victim.hashed_password)
-
-    # and the new login reaches exactly the one client it was invited to
-    from app.services.portal import invites as invite_svc
-
-    assert invite_svc.writer_ids_for_user(session, minted) == [seed["writer_id"]]
-    assert invite_svc.writer_ids_for_user(session, victim) == []
+    assert session.query(User).filter(User.email == "victim@example.com").count() == 1
+    assert invite_svc.writer_ids_for_user(session, victim) == [seed["writer_id"]]
 
 
 def test_a_claim_gets_the_username_it_asks_for(session, seed):

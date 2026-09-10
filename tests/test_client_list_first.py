@@ -103,9 +103,18 @@ def test_client_list_before_any_statements_creates_the_whole_roster(session, cli
     assert reconcile_ingestion(session)["ok"] is True
 
 
-def test_roster_counts_come_from_sheet_membership(session):
-    """A name on both sheets is a client AND a commission partner, so the two
-    counts can overlap — matching the spreadsheet's own row counts."""
+def test_a_name_on_both_sheets_becomes_two_entries(session):
+    """One entry, one role.
+
+    The same person is a client for their own catalog and a commission partner
+    on other people's. Those are different bodies of money, so they are separate
+    entries — the roster row is the unit that owns accounts, that the portal
+    switcher toggles between, and that `publisher_owned` applies to.
+
+    Merging them onto one row put commission statements (CS*) and royalty
+    statements on a single entry, where nothing downstream could tell them
+    apart. 18 entries in the delivered data are in that state.
+    """
     rows = [
         _row("Solo Client"),
         _row("Dual Person"),
@@ -119,12 +128,36 @@ def test_roster_counts_come_from_sheet_membership(session):
     clients = session.query(Writer).filter(Writer.is_client.is_(True)).count()
     partners = session.query(Writer).filter(Writer.is_commission_partner.is_(True)).count()
     assert (clients, partners) == (2, 2)          # 2 client rows, 2 partner rows
-    assert session.query(Writer).filter(Writer.kind.isnot(None)).count() == 3  # 3 people
 
-    dual = session.query(Writer).filter(Writer.canonical_name == "Dual Person").one()
-    assert dual.is_client and dual.is_commission_partner
+    # FOUR entries, not three: the dual person is two of them
+    assert session.query(Writer).filter(Writer.kind.isnot(None)).count() == 4
 
-    # re-importing WITHOUT a row drops that membership (the list is authority)
+    dual = session.query(Writer).filter(Writer.canonical_name == "Dual Person").all()
+    assert len(dual) == 2
+    # and neither is flagged as both, which is what let the money mix
+    assert {(w.is_client, w.is_commission_partner) for w in dual} == {(True, False), (False, True)}
+
+
+def test_reimporting_a_row_reuses_its_own_entry(session):
+    """Idempotent per role: a second import must not keep minting entries."""
+    rows = [
+        _row("Dual Person"),
+        _row("Dual Person", kind=ParsedKind.COMMISSION_PARTNER,
+             sheet="Commission Partner List"),
+    ]
+    importer.apply_rows(session, rows, confirmed_only=True)
+    importer.apply_rows(session, rows, confirmed_only=True)
+    assert session.query(Writer).filter(Writer.canonical_name == "Dual Person").count() == 2
+
+
+def test_dropping_a_row_drops_that_membership(session):
+    """The uploaded list is the authority for who is on the roster."""
+    importer.apply_rows(session, [
+        _row("Solo Client"),
+        _row("Solo Partner", kind=ParsedKind.COMMISSION_PARTNER,
+             sheet="Commission Partner List"),
+    ], confirmed_only=True)
+
     importer.apply_rows(session, [_row("Solo Client")], confirmed_only=True)
     assert session.query(Writer).filter(Writer.is_commission_partner.is_(True)).count() == 0
     assert session.query(Writer).filter(Writer.is_client.is_(True)).count() == 1

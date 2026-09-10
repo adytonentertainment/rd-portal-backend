@@ -58,16 +58,32 @@ class UsernameTaken(Exception):
 
 
 def writer_ids_for_user(db: Session, user: User) -> List[int]:
-    """The clients THIS LOGIN claimed.
+    """Every client THIS LOGIN has claimed.
 
-    Identity is per client. A manager who represents three writers claims three
-    portals from the same mailbox, each with its own username and password, and
-    signing into one must show that client and nothing else — so the claim is
-    read off `writer_contact.user_id`, never off the address.
+    One address, one login, and it holds each client whose invite it accepted —
+    a client entry and a commission-partner entry, or several catalogs. The
+    portal shows one at a time and lets them switch.
+
+    Read off `writer_contact.user_id`, never off the address, because being
+    LISTED on a client (an admin recording a contact email) is not the same as
+    having been admitted to it.
     """
-    return sorted(
+    claimed = [
         wc.writer_id
         for wc in db.query(WriterContact).filter(WriterContact.user_id == user.id)
+    ]
+    if not claimed:
+        return []
+    # An acquired catalog is never the writer's to read, whatever the links say.
+    # Enforced on the READ as well as on the invite: a claim made before the
+    # entry was marked, or by a route added later, must not become a leak.
+    return sorted(
+        w.id
+        for w in db.query(Writer).filter(
+            Writer.id.in_(claimed),
+            Writer.publisher_owned.is_(False),
+            Writer.is_house_account.is_(False),
+        )
     )
 
 
@@ -122,8 +138,18 @@ def create_invite(
     email = email.strip().lower()
     now = datetime.now()
 
-    if db.get(Writer, writer_id) is None:
+    writer = db.get(Writer, writer_id)
+    if writer is None:
         raise ValueError("writer not found")
+    # The publisher's own books are not somebody's portal. Bulk invite already
+    # skipped these; the single-invite dialog did not, so one mis-click handed a
+    # writer a catalog that is not theirs. Enforced here so every caller is
+    # covered, not just the one that remembered.
+    if writer.is_house_account or writer.publisher_owned:
+        raise ValueError(
+            "This catalog belongs to the publisher, not to a writer. "
+            "It has no portal and cannot be invited to."
+        )
 
     # Reject only when THIS client's portal has already been claimed by this
     # address — then the invite is a no-op. Read off the link, not the contact:
@@ -241,28 +267,63 @@ def accept_invite(
     if existing is not None:
         raise ValueError("this client's portal has already been claimed by that email")
 
-    if not password:
-        raise ValueError("password required to create a login")
+    # ONE LOGIN PER ADDRESS, holding every client that address has claimed.
+    #
+    # Somebody who is both a client and a commission partner, or who holds
+    # several catalogs, signs in once and switches between them. Minting a
+    # separate login per claim made that impossible: each account could only
+    # ever see the one client it was created for.
+    #
+    # What does NOT change is that an invite link is not proof of identity. The
+    # token says which mailbox was invited; it must never be enough to act as an
+    # account that already exists, or anyone forwarded a link could take it
+    # over. So an existing login has to be proved before a client is added to
+    # it, either by already being signed in as that address or by its password.
+    user = db.query(User).filter(User.email == email).first()
 
-    chosen = (username or "").strip()
-    if chosen:
-        clash = db.query(User).filter(User.username == chosen).first()
-        if clash is not None:
-            raise UsernameTaken(
-                f"The username {chosen!r} is taken. Pick another."
-            )
+    if user is None:
+        if not password:
+            raise ValueError("password required to create a login")
+        chosen = (username or "").strip()
+        if chosen:
+            clash = db.query(User).filter(User.username == chosen).first()
+            if clash is not None:
+                raise UsernameTaken(f"The username {chosen!r} is taken. Pick another.")
+        else:
+            chosen = suggested_username(db, writer.canonical_name if writer else email)
+        user = User(
+            email=email,
+            username=chosen,
+            hashed_password=bcrypt_context.hash(password),
+            activated=True,
+            royalty_per_stream=0,
+        )
+        db.add(user)
+        db.flush()
     else:
-        chosen = suggested_username(db, writer.canonical_name if writer else email)
-
-    user = User(
-        email=email,
-        username=chosen,
-        hashed_password=bcrypt_context.hash(password),
-        activated=True,
-        royalty_per_stream=0,
-    )
-    db.add(user)
-    db.flush()
+        already_signed_in = bool(
+            authenticated_email
+            and authenticated_email.strip().lower() == (email or "").strip().lower()
+        )
+        if not already_signed_in:
+            if not password:
+                raise InviteAuthRequired(
+                    "This email already has an account. Sign in, or enter its "
+                    "password, to add this client to it."
+                )
+            if not user.hashed_password:
+                # OAuth-only account: no password to check, so the only proof
+                # available is being signed in as it.
+                raise InviteAuthRequired(
+                    "This account signs in with Google. Sign in first, then open "
+                    "the invite link."
+                )
+            try:
+                valid = bcrypt_context.verify(password, user.hashed_password)
+            except Exception:  # malformed/legacy hash must never authenticate
+                valid = False
+            if not valid:
+                raise InviteAuthRequired("Incorrect password for this account.")
 
     # Keep the address book pointing at a login for backwards compatibility;
     # the authority on who claimed what is the link below.

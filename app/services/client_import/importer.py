@@ -30,6 +30,8 @@ from app.models.statements import (
 from .matcher import AccountIndex, AccountRef, MatchResult, normalize
 from .parser import ClientRow, WriterKind as ParsedKind, parse_client_list
 from .validator import summarize, validate_rows
+import re
+from app.services.client_import.matcher import strip_accents
 
 _CATALOG_MAP = {"MECH": Catalog.MECH, "YT": Catalog.YT, "PERF": Catalog.PERF}
 _KIND_MAP = {
@@ -191,6 +193,61 @@ def preview_rows(db: Session, rows: List[ClientRow]) -> dict:
     }
 
 
+def pair_names_to_emails(emails, names):
+    """Decide which contact name belongs to which address.
+
+    The client list gives both as comma-separated cells, and they are NOT
+    guaranteed to line up: 295 of 888 rows carry a different number of names
+    than addresses. One name and two addresses, seven addresses and six names,
+    one address and two names — all real, all in the delivered file.
+
+    Pairing them by position regardless (`names[i]` for `emails[i]`) is what put
+    "Che" on accounting@monkmusic.co and "Nate" on che@chekothari.com: every
+    name after a gap slides onto somebody else's address. A wrong name on a
+    contact is worse than no name, because it is the name an admin reads when
+    deciding who to send a portal invite to.
+
+    So:
+      * counts match -> trust the position. That is the spreadsheet's own
+        convention and it holds for the other two thirds of the file.
+      * counts differ -> only claim a pairing the ADDRESS itself supports, by
+        looking for the name inside the local part (che -> che@chekothari.com,
+        nate -> nate@machelmontano.com). Anything left over stays unnamed and
+        can be filled in by hand, which is a smaller job than finding the ones
+        that are quietly wrong.
+
+    Returns {email: name or None}.
+    """
+    emails = list(emails or [])
+    names = list(names or [])
+    out = {e: None for e in emails}
+
+    if len(emails) == len(names):
+        return dict(zip(emails, names))
+
+    def norm(v):
+        v = strip_accents(str(v or "")).lower()
+        return re.sub(r"[^a-z0-9]+", "", v)
+
+    unclaimed = set(emails)
+    for name in names:
+        # a name may be "Manuel (Eanz)" — try each word, longest first, so a
+        # two-letter fragment cannot claim an address
+        tokens = [t for t in re.split(r"[^A-Za-z0-9]+", strip_accents(name)) if len(t) >= 3]
+        tokens.sort(key=len, reverse=True)
+        for token in tokens:
+            hit = next(
+                (e for e in emails
+                 if e in unclaimed and norm(token) and norm(token) in norm(e.split("@")[0])),
+                None,
+            )
+            if hit is not None:
+                out[hit] = name
+                unclaimed.discard(hit)
+                break
+    return out
+
+
 def _get_or_create_contact(db: Session, email: str, name: Optional[str],
                            lang: Optional[str]):
     """Returns (contact, created)."""
@@ -232,26 +289,39 @@ def _resolve_writer(
     publisher_id: Optional[int],
     all_row_names: Optional[set] = None,
 ) -> Writer:
-    """Find the real client Writer by the row's ARTIST/PUBLISHER name, else
-    create it. Placeholder ingestion writers (kind IS NULL) are never reused
-    here — we only reuse a previously client-import-created writer.
+    """Find the roster entry for this row, else create it.
+
+    An entry is identified by NAME **and ROLE**, not by name alone. The same
+    person legitimately appears on both sheets — a client for their own catalog,
+    a commission partner on other people's — and those are two entries holding
+    two different bodies of money.
+
+    Matching on name alone merged them onto one row, which put commission
+    statements (CS*) and royalty statements on a single entry. Once merged
+    nothing downstream could separate them: the portal switcher works per entry,
+    and so does `publisher_owned`, so a writer shown that row saw their
+    commission and an acquired catalog they had sold, together, with no way to
+    tell them apart. 18 entries in the delivered data are in that state.
+
+    Placeholder ingestion writers (kind IS NULL) are never reused here — we only
+    reuse a previously client-import-created entry of the SAME role.
 
     The client's identity is the Artist/Publisher Name. The payee is merely who
     the money is made out to (stored on payee_name) — many distinct clients can
-    share one payee, so naming the writer after the payee (as this code once
-    did) collapsed unrelated artists into one identity."""
+    share one payee, so naming the entry after the payee (as this code once did)
+    collapsed unrelated artists into one identity."""
     target_name = (row.name or "").strip() or row.payee_name
     norm = normalize(target_name)
 
+    row_kind = _KIND_MAP[row.kind]
+
     def _find(name_exact: str, name_norm: str) -> Optional[Writer]:
-        w = (
-            db.query(Writer)
-            .filter(Writer.kind.isnot(None))
-            .filter(Writer.canonical_name == name_exact)
-            .first()
-        )
+        # Same role as well as same name: a partner row must never adopt the
+        # client entry that happens to share its name.
+        base = db.query(Writer).filter(Writer.kind == row_kind)
+        w = base.filter(Writer.canonical_name == name_exact).first()
         if w is None:
-            for cand in db.query(Writer).filter(Writer.kind.isnot(None)).all():
+            for cand in base.all():
                 if normalize(cand.canonical_name) == name_norm:
                     return cand
         return w
@@ -276,7 +346,7 @@ def _resolve_writer(
         existing = Writer(
             publisher_id=publisher_id,
             canonical_name=target_name,
-            kind=_KIND_MAP[row.kind],
+            kind=row_kind,
             payee_name=row.payee_name,
             preferred_language=row.preferred_language,
             expected_catalogs=catalogs or None,
@@ -285,18 +355,16 @@ def _resolve_writer(
         db.add(existing)
         db.flush()
     else:
-        existing.kind = _KIND_MAP[row.kind]
+        existing.kind = row_kind
         existing.payee_name = row.payee_name
         existing.preferred_language = row.preferred_language
         existing.cadence = cadence
         if catalogs:
             existing.expected_catalogs = catalogs
-    # Roster membership is additive across the two sheets: a name on both is a
-    # client AND a commission partner (kind alone can't express that).
-    if row.kind == ParsedKind.CLIENT:
-        existing.is_client = True
-    else:
-        existing.is_commission_partner = True
+    # One entry, one role. A name on both sheets yields two entries, each
+    # flagged for its own sheet — never one row flagged as both.
+    existing.is_client = row.kind == ParsedKind.CLIENT
+    existing.is_commission_partner = row.kind != ParsedKind.CLIENT
     # inherit publisher from a matched account if we don't have one
     return existing
 
@@ -376,8 +444,11 @@ def _apply_row(db: Session, row: ClientRow, account_codes: List[str], c: dict,
     if row.payee_name:
         _add_alias(db, writer, row.payee_name)
 
-    for i, email in enumerate(row.valid_emails):
-        name = row.contact_names[i] if i < len(row.contact_names) else None
+    paired = pair_names_to_emails(row.valid_emails, row.contact_names)
+    # The first address on the row is the primary contact; the rest are managers.
+    # That is positional by design and unrelated to which NAME belongs where.
+    for index, email in enumerate(row.valid_emails):
+        name = paired.get(email)
         contact, was_created = _get_or_create_contact(
             db, email, name, row.preferred_language)
         if was_created:
@@ -390,7 +461,7 @@ def _apply_row(db: Session, row: ClientRow, account_codes: List[str], c: dict,
                 .first()
             )
             if link is None:
-                role = ContactRole.PRIMARY if i == 0 else ContactRole.MANAGER
+                role = ContactRole.PRIMARY if index == 0 else ContactRole.MANAGER
                 db.add(WriterContact(writer_id=writer.id, contact_id=contact.id, role=role))
                 c["created_links"] += 1
         db.flush()
@@ -431,6 +502,62 @@ def _should_auto_apply(m: MatchResult) -> bool:
     return m.confidence == "probable" and (m.score or 0) >= AUTO_APPLY_SCORE
 
 
+_NEW_SUFFIX_RE = re.compile(r"\bnew\b\s*$")
+
+
+def mark_publisher_owned_counterparts(db: Session) -> int:
+    """Infer which entries are catalogs the publisher acquired.
+
+    The client list encodes this in the NAME and nowhere else. Where a writer
+    sold their old catalog and kept recording under a new one, the sheet holds
+    two client rows:
+
+        Likybo NEW   -> the catalog that is still THEIRS
+        Likybo       -> the old catalog, now the publisher's
+
+    So a trailing "NEW" is a statement about its counterpart: the row without
+    it is the acquired one. This marks that counterpart `publisher_owned`,
+    which removes it from the writer's portal, from their account switcher, and
+    from anything invitable.
+
+    Two rules keep it from over-reaching:
+
+    * ONLY client-sheet rows are ever marked. Somebody who is also a commission
+      partner has a same-named row on the partner sheet — J Swey, Likybo and
+      Dante Storch all do — and that is commission they earned, their money.
+      Marking it would hide their own income from them.
+    * It only ever SETS the flag. An admin who marked something by hand, or
+      unmarked it deliberately, is not overruled by the next import.
+
+    Verified against the delivered list (2026-09-10): 10 rows end in NEW, 9 have
+    a counterpart, all 9 correct. The tenth has none and is left alone.
+    """
+    writers = db.query(Writer).all()
+    by_norm = {}
+    for w in writers:
+        by_norm.setdefault(normalize(w.canonical_name), []).append(w)
+
+    marked = 0
+    for w in writers:
+        n = normalize(w.canonical_name)
+        if not _NEW_SUFFIX_RE.search(n):
+            continue
+        base = _NEW_SUFFIX_RE.sub("", n).strip()
+        if not base:
+            continue
+        for other in by_norm.get(base, []):
+            if other.id == w.id or other.publisher_owned:
+                continue
+            # never the commission-partner side, and never a house account
+            if other.is_commission_partner or other.is_house_account:
+                continue
+            other.publisher_owned = True
+            marked += 1
+    if marked:
+        db.flush()
+    return marked
+
+
 def apply_rows(db: Session, rows: List[ClientRow], confirmed_only: bool = True) -> dict:
     """Apply the client list.
 
@@ -454,6 +581,9 @@ def apply_rows(db: Session, rows: List[ClientRow], confirmed_only: bool = True) 
         row, m = p.row, p.match
         codes = m.account_codes if (not confirmed_only or _should_auto_apply(m)) else []
         _apply_row(db, row, codes, c, all_row_names=all_row_names)
+    # After every row exists: work out which entries are acquired catalogs, from
+    # the "X NEW" / "X" pairing the sheet uses to express it.
+    c["publisher_owned_marked"] = mark_publisher_owned_counterparts(db)
     db.commit()
     return {**c, "findings_summary": summarize(findings)}
 

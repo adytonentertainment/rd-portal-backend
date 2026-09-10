@@ -186,3 +186,60 @@ def test_recording_a_contact_email_does_not_admit_them(session, client, world):
     client.login_as(world["guest"])
     assert client.get(f"/me/writers/{second.id}/members").status_code == 404
     assert [w["name"] for w in client.get("/me/writers").json()] == ["Amenazzy"]
+
+
+def test_a_publisher_owned_account_cannot_be_invited(session, world):
+    """An acquired catalog stays on the roster under the original writer's name
+    so the publisher can account for it, but the writer has no claim to that
+    money. Only bulk invite skipped these; the single-invite dialog did not, so
+    one mis-click handed somebody a catalog they no longer own."""
+    from app.models.statements import Publisher
+    from app.services.portal import invites as invite_svc
+
+    pub = session.query(Publisher).first()
+    owned = Writer(publisher_id=pub.id, canonical_name="Amenazzy (100% to Regalias)",
+                   is_house_account=True)
+    session.add(owned)
+    session.commit()
+
+    with pytest.raises(ValueError) as err:
+        invite_svc.create_invite(session, owned.id, "someone@x.com")
+    assert "belongs to the publisher" in str(err.value)
+
+
+def test_an_acquired_catalog_is_invisible_to_the_writer(session, client, world):
+    """The writer sold this catalog. It stays on the roster under their name so
+    the publisher can account for it, but the money is not theirs any more.
+
+    Enforced on the READ, not only on the invite: a claim made before the entry
+    was marked as acquired must not keep working.
+    """
+    from app.models.statements import Publisher
+    from app.services.portal import invites as invite_svc
+
+    pub = session.query(Publisher).first()
+    old_catalog = Writer(publisher_id=pub.id, canonical_name="Amenazzy (100% to Regalias)")
+    session.add(old_catalog)
+    session.flush()
+
+    # a claim that predates the entry being marked
+    guest_contact = session.query(Contact).filter(Contact.email == "manager@x.com").one()
+    session.add(WriterContact(writer_id=old_catalog.id, contact_id=guest_contact.id,
+                              role=ContactRole.MANAGER, user_id=world["guest"].id))
+    session.commit()
+
+    # before marking, it is theirs to read
+    assert old_catalog.id in invite_svc.writer_ids_for_user(session, world["guest"])
+
+    old_catalog.publisher_owned = True
+    session.commit()
+
+    # after marking, it is gone from every portal read and from the switcher
+    assert old_catalog.id not in invite_svc.writer_ids_for_user(session, world["guest"])
+    client.login_as(world["guest"])
+    assert old_catalog.id not in [w["id"] for w in client.get("/me/writers").json()]
+    assert client.get(f"/me/writers/{old_catalog.id}/members").status_code == 404
+
+    # and it can no longer be invited to at all
+    with pytest.raises(ValueError):
+        invite_svc.create_invite(session, old_catalog.id, "someone@x.com")

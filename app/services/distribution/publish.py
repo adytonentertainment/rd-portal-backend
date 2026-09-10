@@ -28,6 +28,7 @@ from app.models.statements import (
     Statement,
     StatementBatch,
     Writer,
+    WriterStatus,
     StatementUpload,
     UploadStatus,
 )
@@ -191,3 +192,126 @@ def unpublish(db: Session, distribution_id: int) -> dict:
     dist.portal_visible = False
     db.commit()
     return {"distribution_id": distribution_id, "portal_visible": False}
+
+
+class WriterNotSendable(Exception):
+    """This client cannot receive statements yet, and why."""
+
+    def __init__(self, reasons):
+        self.reasons = reasons
+        super().__init__("; ".join(reasons))
+
+
+def writer_blockers(writer) -> List[str]:
+    """Why this client cannot be sent to, in words an admin can act on."""
+    if writer is None:
+        return ["client not found"]
+    if writer.is_house_account:
+        return ["this is the publisher's own account, not a client portal"]
+    if getattr(writer, "publisher_owned", False):
+        return ["this catalog belongs to the publisher, not to the writer"]
+    if writer.status == WriterStatus.OFFBOARDED:
+        return ["this client has been offboarded"]
+    reasons = []
+    if writer.kind is None:
+        reasons.append("not matched to a client on the list")
+    if not writer.expected_catalogs:
+        reasons.append("no revenue type set")
+    if writer.cadence is None:
+        reasons.append("no payment cadence set")
+    return reasons
+
+
+def distribute_writer(
+    db: Session, writer_id: int, published_by: Optional[int] = None
+) -> dict:
+    """Publish one client's ready statements to their portal, on request.
+
+    Distinct from `distribute_batch` in exactly one way that matters: it does
+    NOT require the whole batch to be clean. A batch is gated because sending it
+    while an account has no owner would silently drop somebody's statement — but
+    that is an argument about the batch, not about this client. When a client
+    rings up asking where their statement is, the fact that a different writer's
+    account is unresolved is not a reason to make them wait.
+
+    What it does still refuse is a client who is themselves the problem:
+    unmatched, missing revenue type or cadence, offboarded, a house account, or
+    an acquired catalog that is not theirs to see. Those are answered by fixing
+    the client, and the reasons come back so the admin is told which.
+
+    Cadence de-duplication and supersede behave exactly as in a batch send —
+    the same helper decides — so a client asking for their statement early can
+    never end up with a quarterly and the semiannual that covers it.
+    """
+    assert_no_ingest_in_flight(db)
+
+    writer = db.get(Writer, writer_id)
+    blockers = writer_blockers(writer)
+    if blockers:
+        raise WriterNotSendable(blockers)
+
+    rows = (
+        db.query(Statement, BeneficiaryAccount, StatementBatch)
+        .join(BeneficiaryAccount, Statement.account_id == BeneficiaryAccount.id)
+        .join(StatementBatch, Statement.batch_id == StatementBatch.id)
+        .filter(
+            BeneficiaryAccount.writer_id == writer_id,
+            Statement.parse_status == ParseStatus.PARSED,
+        )
+        .all()
+    )
+
+    now = datetime.now()
+    published = superseded = skipped_dedup = already = 0
+
+    for stmt, acct, batch in rows:
+        catalog = batch.catalog
+        actives = _active_distributions_for_account(db, writer.id, acct.id, catalog)
+        skip = False
+        to_supersede: List[Distribution] = []
+
+        for d in actives:
+            if d.statement_id == stmt.id:
+                already += 1
+                skip = True
+                break
+            if d.period_code == stmt.period_code:
+                to_supersede.append(d)
+            elif covers(d.period_code, stmt.period_code):
+                skip = True
+                break
+            elif covers(stmt.period_code, d.period_code):
+                to_supersede.append(d)
+        if skip:
+            if not to_supersede:
+                skipped_dedup += 1
+            continue
+
+        dist = Distribution(
+            statement_id=stmt.id,
+            writer_id=writer.id,
+            batch_id=batch.id,
+            period_code=stmt.period_code,
+            catalog=catalog,
+            published_at=now,
+            published_by=published_by,
+            portal_visible=True,
+            gate_snapshot={"on_request": True, "writer_id": writer_id},
+        )
+        db.add(dist)
+        db.flush()
+        for old in to_supersede:
+            old.portal_visible = False
+            old.superseded_by = dist.id
+            superseded += 1
+        published += 1
+
+    db.commit()
+    return {
+        "writer_id": writer_id,
+        "writer_name": writer.canonical_name,
+        "published": published,
+        "superseded": superseded,
+        "skipped_cadence_dedup": skipped_dedup,
+        "already_distributed": already,
+    }

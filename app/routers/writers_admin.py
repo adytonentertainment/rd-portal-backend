@@ -1028,6 +1028,12 @@ _RESET_TABLES = [
     "portal_invite",
     "writer_contact",
     "contact",
+    # Before `writer`, and easy to forget: aliases point at it. SQLite does not
+    # enforce foreign keys by default, so leaving this out passed locally and
+    # failed on Postgres, where the reset died half-done with the roster already
+    # gone. Anything with a FK into this list has to be cleared before its
+    # parent — see test_reset_all_data.
+    "writer_alias",
     "writer",
     "client_import",
     "statement_upload",

@@ -138,3 +138,63 @@ def test_pdf_missing_file_is_404(session, scenario):
     session.commit()
     client = _client(session, {"user": scenario["rz_user"]})
     assert client.get(f"/me/statements/{scenario['dist_id']}/pdf").status_code == 404
+
+
+# --- the spreadsheet, not just the PDF --------------------------------------
+#
+# Clients asked for their statements in a form they can work with: a PDF is for
+# reading, not for summing. Every statement arrives as a PDF/XLSX pair and both
+# are kept, so the portal hands back the publisher's own source file rather
+# than a CSV rebuilt from parsed lines — a regenerated export would disagree
+# with the PDF the moment parsing missed a column, and the two get read side by
+# side.
+
+
+@pytest.fixture()
+def with_xlsx(session, scenario, tmp_path):
+    """Attach a spreadsheet to the scenario's statement."""
+    dist = session.get(Distribution, scenario["dist_id"])
+    stmt = session.get(Statement, dist.statement_id)
+    xlsx = tmp_path / "redzed.xlsx"
+    xlsx.write_bytes(b"PK\x03\x04 fake xlsx bytes")
+    stmt.xlsx_path = str(xlsx)
+    session.commit()
+    return scenario
+
+
+def test_xlsx_download_scoped(session, with_xlsx):
+    holder = {"user": with_xlsx["rz_user"]}
+    client = _client(session, holder)
+    did = with_xlsx["dist_id"]
+
+    r = client.get(f"/me/statements/{did}/xlsx")
+    assert r.status_code == 200
+    assert "spreadsheetml" in r.headers["content-type"]
+    assert r.content.startswith(b"PK")
+    # named for a person filing it, not for the storage layout
+    assert ".xlsx" in r.headers.get("content-disposition", "")
+
+    # A download route must not become a way around the ownership check.
+    holder["user"] = with_xlsx["stranger_user"]
+    assert client.get(f"/me/statements/{did}/xlsx").status_code == 404
+
+
+def test_xlsx_missing_is_404_not_a_broken_file(session, scenario):
+    """Older statements may have no spreadsheet. Say so rather than serving
+    zero bytes that open as a corrupt workbook."""
+    client = _client(session, {"user": scenario["rz_user"]})
+    r = client.get(f"/me/statements/{scenario['dist_id']}/xlsx")
+    assert r.status_code == 404
+
+
+def test_rows_say_which_files_exist(session, with_xlsx):
+    """The list drives the buttons, so it has to say which files are there —
+    offering a download that 404s is worse than not offering it."""
+    client = _client(session, {"user": with_xlsx["rz_user"]})
+    rows = client.get("/me/statements").json()
+    assert rows
+    assert rows[0]["has_pdf"] is True
+    assert rows[0]["has_xlsx"] is True
+
+    summary = client.get(f"/me/statements/{with_xlsx['dist_id']}").json()
+    assert summary["has_pdf"] is True and summary["has_xlsx"] is True

@@ -267,6 +267,9 @@ async def list_my_statements(
             "payable": str(s.payable) if s.payable is not None else None,
             "published_at": d.published_at.isoformat() if d.published_at else None,
             "line_count": s.line_count,
+            # Both files are kept per statement; the row offers whichever exist.
+            "has_pdf": s.pdf_path is not None,
+            "has_xlsx": s.xlsx_path is not None,
         }
         for d, s, w in rows
     ]
@@ -589,6 +592,7 @@ async def get_my_statement(
         "line_count": s.line_count,
         "published_at": d.published_at.isoformat() if d.published_at else None,
         "has_pdf": s.pdf_path is not None,
+        "has_xlsx": s.xlsx_path is not None,
     }
 
 
@@ -609,6 +613,38 @@ async def get_my_statement_pdf(
         raise HTTPException(status_code=404, detail="PDF not available for this statement")
     filename = f"{w.canonical_name} - {d.period_code} ({d.catalog.value}).pdf"
     return FileResponse(pdf_path, media_type="application/pdf", filename=filename)
+
+
+@me_router.get("/statements/{distribution_id}/xlsx")
+async def get_my_statement_xlsx(
+    distribution_id: int,
+    contact: Contact = Depends(current_contact),
+    db: Session = Depends(get_session),
+):
+    """Download the statement's spreadsheet (scoped).
+
+    Clients asked for their statements in a form they can actually work with —
+    the PDF is for reading, not for summing. Every statement already arrives as
+    a PDF/XLSX pair and both are kept, so this hands back the publisher's own
+    source file rather than a CSV rebuilt from parsed line items. That matters:
+    a regenerated export would quietly disagree with the PDF the moment parsing
+    missed a column, and the two are read side by side.
+
+    Same ownership check as the PDF — a distribution the contact cannot see is
+    404 here exactly as it is there.
+    """
+    d, s, w = _scoped_distribution(db, contact, distribution_id)
+    xlsx_path = resolve_stored_path(s.xlsx_path) if s.xlsx_path else None
+    if not xlsx_path or not os.path.exists(xlsx_path):
+        raise HTTPException(
+            status_code=404, detail="Spreadsheet not available for this statement"
+        )
+    filename = f"{w.canonical_name} - {d.period_code} ({d.catalog.value}).xlsx"
+    return FileResponse(
+        xlsx_path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=filename,
+    )
 
 
 def _breakdown_by(db: Session, statement_id: int, column):

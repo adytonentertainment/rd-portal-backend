@@ -14,6 +14,7 @@ import secrets
 from datetime import datetime, timedelta
 from typing import List, Optional, Tuple
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.models import User
@@ -217,6 +218,29 @@ class InviteAuthRequired(Exception):
     """The invite is valid but the caller has not proven they own the account."""
 
 
+def user_by_email(db: Session, email: str) -> Optional[User]:
+    """The login for an address, matched the way email actually works.
+
+    Invites lowercase the address they are issued to; signup stores whatever
+    case the person typed. So somebody who registered as "Name@example.com"
+    was invisible to a lookup for "name@example.com", and the invite screen
+    concluded they had no login and offered to create one — asking an existing
+    account holder to choose a password, which is exactly what they reported.
+
+    Deterministic when two rows already differ only by case: oldest wins, so
+    the same account is chosen every time rather than alternating.
+    """
+    target = (email or "").strip().lower()
+    if not target:
+        return None
+    return (
+        db.query(User)
+        .filter(func.lower(User.email) == target)
+        .order_by(User.id)
+        .first()
+    )
+
+
 def accept_invite(
     db: Session,
     raw_token: str,
@@ -279,7 +303,7 @@ def accept_invite(
     # account that already exists, or anyone forwarded a link could take it
     # over. So an existing login has to be proved before a client is added to
     # it, either by already being signed in as that address or by its password.
-    user = db.query(User).filter(User.email == email).first()
+    user = user_by_email(db, email)
 
     if user is None:
         if not password:

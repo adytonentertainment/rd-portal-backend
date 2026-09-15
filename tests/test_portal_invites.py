@@ -290,3 +290,47 @@ def test_one_link_claims_one_client_and_cannot_be_reused(session, seed):
         json={"token": raw, "password": "hunter2hunter2", "username": "once_claim_2"},
     )
     assert again.status_code == 400
+
+
+# --- an existing login must be recognised whatever case it was typed in ------
+#
+# Invites lowercase the address; signup stores whatever the person typed. A
+# user registered as "Name@example.com" was therefore invisible to a lookup for
+# "name@example.com", so the invite screen decided they had no login and asked
+# them to choose a password for an account they already had. Reported twice.
+
+
+def test_an_existing_login_is_found_regardless_of_email_case(session):
+    from app.models.models import User
+    from app.services.portal.invites import user_by_email
+
+    session.add(User(email="Manuel.Eanz@Example.COM", username="manuel", royalty_per_stream=0))
+    session.commit()
+
+    for typed in ("manuel.eanz@example.com", "MANUEL.EANZ@EXAMPLE.COM", " Manuel.Eanz@Example.com "):
+        found = user_by_email(session, typed)
+        assert found is not None, f"existing login not found for {typed!r}"
+        assert found.username == "manuel"
+
+
+def test_unknown_address_still_has_no_login(session):
+    from app.services.portal.invites import user_by_email
+
+    assert user_by_email(session, "nobody@example.com") is None
+    assert user_by_email(session, "") is None
+    assert user_by_email(session, None) is None
+
+
+def test_case_duplicates_resolve_to_the_same_account_every_time(session):
+    """If two rows already differ only by case, the choice must be stable —
+    alternating between them would hand the same person different portals."""
+    from app.models.models import User
+    from app.services.portal.invites import user_by_email
+
+    session.add(User(email="dup@example.com", username="first", royalty_per_stream=0))
+    session.commit()
+    session.add(User(email="DUP@example.com", username="second", royalty_per_stream=0))
+    session.commit()
+
+    picks = {user_by_email(session, "dup@example.com").username for _ in range(5)}
+    assert picks == {"first"}

@@ -25,6 +25,7 @@ import os
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
+from collections import defaultdict
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -410,8 +411,37 @@ async def list_my_transactions(
         .limit(TOP_SONGS_LIMIT)
         .all()
     )
+    # Territories per song, for the songs list only.
+    #
+    # Dropping country from the song key is what made this endpoint affordable,
+    # but the songs list counts territories per work — so with no country on a
+    # song row it showed every song reaching 0 territories. Carrying the codes
+    # themselves (rather than a per-statement count) lets the client union them
+    # across statements; a count would double-count a song that earns in the
+    # same country in two periods.
+    #
+    # Codes are two or three characters and a work charts in a bounded number of
+    # countries, so this stays small where the full song x country cross product
+    # did not.
+    titles = {t for _, t, _, _ in song_rows}
+    territories_by_title = defaultdict(set)
+    if titles:
+        for title, country in (
+            db.query(StatementLine.song_title, StatementLine.country)
+            .filter(
+                StatementLine.statement_id.in_(statement_ids),
+                StatementLine.song_title.in_(titles),
+            )
+            .distinct()
+            .all()
+        ):
+            code = (country or "").strip().upper()
+            if code:
+                territories_by_title[title].add(code)
+
     for sid, title, earnings, units in song_rows:
         label, date, catalog = meta[sid]
+        codes = sorted(territories_by_title.get(title, ()))
         out.append(
             {
                 "amount": float(earnings or 0),
@@ -424,6 +454,8 @@ async def list_my_transactions(
                 "catalog": catalog,
                 "statementId": sid,
                 "is_song_row": True,
+                "territories": codes,
+                "territory_count": len(codes),
             }
         )
     return out
@@ -946,7 +978,7 @@ async def preview_invite(token: str, db: Session = Depends(get_session)):
     # client to it, so the form asks for that account's existing password rather
     # than setting up a new login — and offers no username, because the account
     # already has one.
-    existing = db.query(User).filter(User.email == inv.email).first()
+    existing = invite_svc.user_by_email(db, inv.email)
     has_login = existing is not None
     return {
         "email": inv.email,

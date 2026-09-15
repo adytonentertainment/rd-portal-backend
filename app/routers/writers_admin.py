@@ -1559,6 +1559,63 @@ async def add_contact(
     return await get_writer(writer_id, user=user, db=db)
 
 
+class ContactRename(BaseModel):
+    display_name: Optional[str] = None
+
+
+@writers_admin_router.patch("/{writer_id}/contacts/{contact_id}")
+async def rename_contact(
+    writer_id: int,
+    contact_id: int,
+    payload: ContactRename,
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_session),
+):
+    """Set the name shown for a contact.
+
+    The client list cannot always say who an address belongs to. 78 rows give
+    "Manuel (Eanz)" as the only name against two addresses, so neither can be
+    claimed from the sheet; a single row that listed the artist's name as a
+    contact was the only thing naming one of them, and it named it wrongly.
+
+    A contact is shared — that address reaches 79 clients — so this is stored
+    on the Contact, not on the link, and the correction lands everywhere at
+    once. That is the point: fixing it per client would mean 79 edits and a
+    guarantee they drift apart.
+
+    Blank clears the name, so the address shows instead of a wrong name.
+    """
+    _get_writer_or_404(db, writer_id)
+    link = (
+        db.query(WriterContact)
+        .filter(
+            WriterContact.writer_id == writer_id,
+            WriterContact.contact_id == contact_id,
+        )
+        .first()
+    )
+    if link is None:
+        raise HTTPException(status_code=404, detail="Contact is not linked to this writer")
+
+    contact = db.get(Contact, contact_id)
+    if contact is None:
+        raise HTTPException(status_code=404, detail="Contact not found")
+
+    name = (payload.display_name or "").strip()
+    contact.display_name = name or None
+    shared = (
+        db.query(WriterContact)
+        .filter(WriterContact.contact_id == contact_id)
+        .count()
+    )
+    db.commit()
+    logger.info(
+        f"admin {user.id} renamed contact {contact_id} to {name!r} "
+        f"(shared across {shared} client(s))"
+    )
+    return await get_writer(writer_id, user=user, db=db)
+
+
 @writers_admin_router.delete("/{writer_id}/contacts/{contact_id}")
 async def unlink_contact(
     writer_id: int,

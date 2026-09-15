@@ -28,7 +28,7 @@ from app.models.statements import (
     WriterKind,
 )
 
-from .matcher import AccountIndex, AccountRef, MatchResult, normalize
+from .matcher import AccountIndex, AccountRef, MatchResult, _split_candidates, normalize
 from .parser import ClientRow, WriterKind as ParsedKind, parse_client_list
 from .validator import summarize, validate_rows
 import re
@@ -192,6 +192,29 @@ def preview_rows(db: Session, rows: List[ClientRow]) -> dict:
         "findings": [f.as_dict() for f in findings],
         "rows": [p.as_dict() for p in plans],
     }
+
+
+def contact_names_for_row(row):
+    """The names on a row that are actually CONTACT names.
+
+    A row's own artist name sometimes turns up in the Contact Name cell. One
+    row of 79 did it: "ODK Beats (Loudness Music)" listed its contacts as
+    "Manuel (Eanz), ODK Beats". That row alone has as many names as addresses,
+    so it pairs positionally and hands aramtve@gmail.com the name "ODK Beats"
+    — while the other 78 rows sharing that address give only "Manuel (Eanz)".
+
+    Contacts are shared, and a display name is claimed once, so the single
+    mis-entered row decided the name every one of those 79 clients shows. The
+    artist is not the contact: drop any candidate that is just the row's own
+    artist or payee name back at us, and the row falls in line with the rest.
+    """
+    banned = set()
+    for source in (row.name, row.payee_name):
+        for cand in _split_candidates(source or ""):
+            n = normalize(cand)
+            if n:
+                banned.add(n)
+    return [n for n in (row.contact_names or []) if normalize(n) not in banned]
 
 
 def pair_names_to_emails(emails, names):
@@ -471,7 +494,7 @@ def _apply_row(db: Session, row: ClientRow, account_codes: List[str], c: dict,
     if row.payee_name:
         _add_alias(db, writer, row.payee_name)
 
-    paired = pair_names_to_emails(row.valid_emails, row.contact_names)
+    paired = pair_names_to_emails(row.valid_emails, contact_names_for_row(row))
     # The first address on the row is the primary contact; the rest are managers.
     # That is positional by design and unrelated to which NAME belongs where.
     for index, email in enumerate(row.valid_emails):

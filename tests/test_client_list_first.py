@@ -257,3 +257,61 @@ def test_reimporting_does_not_duplicate_contacts(session):
     importer.apply_rows(session, rows, confirmed_only=True)
     importer.apply_rows(session, rows, confirmed_only=True)
     assert session.query(Contact).filter(Contact.email == "x@y.com").count() == 1
+
+
+# --- an artist's own name is not a contact name -----------------------------
+#
+# aramtve@gmail.com reaches 79 clients. 78 of those rows name only
+# "Manuel (Eanz)" against two addresses, so nothing can be paired. Row 223
+# ("ODK Beats (Loudness Music)") listed "Manuel (Eanz), ODK Beats" — two names
+# for two addresses — so it paired positionally and gave that address the name
+# "ODK Beats". Contacts are shared and the name is claimed once, so one
+# mis-entered row decided what all 79 clients displayed.
+
+
+def test_the_rows_own_artist_name_is_not_taken_as_a_contact_name(session):
+    from app.services.client_import.importer import contact_names_for_row, pair_names_to_emails
+
+    row = _row("ODK Beats (Loudness Music)", payee="Loudness Music")
+    row.emails = [
+        ParsedEmail("loudnessmusicoficial@gmail.com", True),
+        ParsedEmail("aramtve@gmail.com", True),
+    ]
+    row.contact_names = ["Manuel (Eanz)", "ODK Beats"]
+
+    assert contact_names_for_row(row) == ["Manuel (Eanz)"]
+
+    paired = pair_names_to_emails(row.valid_emails, contact_names_for_row(row))
+    # the artist's name must not end up as a person's name on that address
+    assert paired["aramtve@gmail.com"] != "ODK Beats"
+
+
+def test_a_real_contact_name_is_still_kept(session):
+    """The exclusion must not eat legitimate names that merely sit on the row."""
+    from app.services.client_import.importer import contact_names_for_row
+
+    row = _row("8K", payee="Adrian Joseph Perez")
+    row.contact_names = ["Adrian", "David"]
+    assert contact_names_for_row(row) == ["Adrian", "David"]
+
+
+def test_renaming_a_shared_contact_fixes_every_client_at_once(session):
+    """That address reaches 79 clients; the name lives on the Contact so one
+    correction lands everywhere rather than needing 79 edits."""
+    from app.models.statements import Contact, WriterContact
+
+    rows = [_row("Artist A"), _row("Artist B"), _row("Artist C")]
+    for r in rows:
+        r.emails = [ParsedEmail("shared@label.com", True)]
+    importer.apply_rows(session, rows, confirmed_only=True)
+
+    contact = session.query(Contact).filter(Contact.email == "shared@label.com").one()
+    assert session.query(WriterContact).filter(WriterContact.contact_id == contact.id).count() == 3
+
+    contact.display_name = "Manuel (Eanz)"
+    session.commit()
+
+    # every client that reaches this address sees the corrected name
+    links = session.query(WriterContact).filter(WriterContact.contact_id == contact.id).all()
+    for link in links:
+        assert session.get(Contact, link.contact_id).display_name == "Manuel (Eanz)"

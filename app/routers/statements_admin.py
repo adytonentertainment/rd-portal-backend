@@ -1,10 +1,12 @@
+import csv
+import io
 import os
 import shutil
 from datetime import datetime
 from decimal import Decimal
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -42,6 +44,7 @@ from app.schemas.statements import (
     ValidationRunSummary,
     WaiveRequest,
 )
+from app.services.statement_ingest.failures import collect_failures
 from app.services.statement_ingest.storage import incoming_dir
 from app.services.statement_ingest.upload_stream import (
     UploadStreamError,
@@ -461,6 +464,14 @@ async def list_statement_uploads(
                 "parsed": parse.get("parsed"),
                 "parse_total": parse.get("total"),
                 "parse_failed": parse.get("failed"),
+                # Files the SORT stage rejected. These never become statements,
+                # so they are invisible to every parse-based counter — a drop
+                # where every filename was malformed finished "Done, 0 failed"
+                # with nothing ingested. Counts only; the names are on
+                # /uploads/{id}/failures.
+                "sort_unparseable": len(sort.get("unparseable") or []),
+                "sort_unpaired": len(sort.get("unpaired") or []),
+                "sort_duplicates": len(sort.get("duplicates") or []),
             },
         })
     return {"items": out}
@@ -487,6 +498,60 @@ async def upload_missing(
         "missing": missing,
         "short": short,
     }
+
+
+@statements_admin_router.get("/uploads/{upload_id}/failures")
+async def upload_failures(
+    upload_id: int,
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_session),
+):
+    """Every problem this upload hit, with a reason and what to do about it.
+
+    The activity panel could only ever show a COUNT of failures. The detail
+    behind that count was already being written — sort rejections onto
+    `upload.stats`, parse errors onto `Statement.parse_error` — and simply
+    never read back, so "3 failed" meant opening the server log to find out
+    which three. This is that log, as data.
+    """
+    upload = db.get(StatementUpload, upload_id)
+    if upload is None:
+        raise HTTPException(status_code=404, detail="Upload not found")
+    return collect_failures(db, upload)
+
+
+@statements_admin_router.get("/uploads/{upload_id}/failures.csv")
+async def upload_failures_csv(
+    upload_id: int,
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_session),
+):
+    """The same list as a download, so a failure report can be forwarded to
+    the statement source without anyone screenshotting a panel."""
+    upload = db.get(StatementUpload, upload_id)
+    if upload is None:
+        raise HTTPException(status_code=404, detail="Upload not found")
+    report = collect_failures(db, upload)
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "severity", "stage", "file", "account_code", "writer_name",
+        "period_code", "statement_id", "reason", "what_to_do", "raw_error",
+    ])
+    for r in report["items"]:
+        writer.writerow([
+            r["severity"], r["stage"], r["file"] or "", r["account_code"] or "",
+            r["writer_name"] or "", r["period_code"] or "",
+            r["statement_id"] or "", r["reason"], r["hint"], r["raw"] or "",
+        ])
+
+    filename = f"upload-{upload_id}-failures.csv"
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @statements_admin_router.get("/uploads/{upload_id}")

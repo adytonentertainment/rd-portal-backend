@@ -45,6 +45,7 @@ from app.models.statements import (
     WriterKind,
     WriterStatus,
 )
+from app.routers.portal import earnings_for_writers, transactions_for_writers
 from app.routers.statements_admin import require_admin
 from app.services.client_import.matcher import normalize as normalize_name
 from app.services.portal import invites as invite_svc
@@ -537,6 +538,58 @@ async def list_writers(
         for w in writers
     ]
     return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+@writers_admin_router.get("/{writer_id}/portal-view")
+async def writer_portal_view(
+    writer_id: int,
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_session),
+):
+    """READ-ONLY preview of what one client sees in their own portal.
+
+    RD asked to be able to click into a client and see their data. The obvious
+    implementation — mint the admin a client session — is the one not taken:
+    impersonation puts a writable client session in an admin's browser, and
+    every safeguard after that is a promise rather than a mechanism.
+
+    This instead serves the client's OWN aggregates through an admin-only
+    route. It reuses the portal's aggregation functions rather than
+    reimplementing them, so the preview cannot drift from the real thing: if
+    the portal's numbers change, these change with them.
+
+    Read-only is structural, not cosmetic. There is no write counterpart to
+    this endpoint, so a preview cannot alter a client's data however the UI
+    behaves. Hiding buttons would not have been a control.
+    """
+    writer = db.get(Writer, writer_id)
+    if writer is None:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    scope = [writer_id]
+
+    # Someone will eventually ask who looked at a client's royalties. Logged at
+    # the point of access, with the admin's identity, so there is an answer.
+    logger.info(
+        f"portal preview: admin {user.email} (id={user.id}) viewed "
+        f"writer {writer_id} ({writer.canonical_name})"
+    )
+
+    return {
+        "writer": {
+            "id": writer.id,
+            "name": writer.canonical_name,
+            "payee_name": writer.payee_name,
+            "preferred_language": writer.preferred_language,
+        },
+        # Exactly what /me/earnings and /me/transactions return for this
+        # client — same functions, same shape, so the admin is looking at the
+        # client's page and not an approximation of it.
+        "earnings": earnings_for_writers(db, scope),
+        "transactions": transactions_for_writers(db, scope),
+        "preview": True,
+        "read_only": True,
+    }
 
 
 @writers_admin_router.get("/summary")

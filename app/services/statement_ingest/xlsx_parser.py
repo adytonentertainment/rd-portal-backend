@@ -21,6 +21,7 @@ from typing import Dict, List, Optional, Tuple
 import openpyxl
 
 from app.models.statements import StatementLine
+from app.services.statement_ingest.text_repair import repair_rows
 
 SHEET_NAME = "Blad1"
 
@@ -47,6 +48,11 @@ HEADER_MAP = {
     "Units": "units",
     "Earnings": "earnings",
 }
+
+# Free-text columns that can carry the source's mis-encoding. song_title is
+# the one writers actually read; the others are included because the same
+# broken export writes them all.
+TEXT_FIELDS = ("song_title", "channel", "income_source", "income_type")
 
 DECIMAL_FIELDS = {
     "price",
@@ -165,6 +171,13 @@ def parse_statement_xlsx(path) -> Tuple[List[Dict], Decimal, Optional[Decimal], 
 
         if columns is None:
             raise ValueError("No header row starting with 'Period' found in %s" % path)
+
+        # Repair the source's mis-encoded text (see text_repair). Done here,
+        # once per file and across all its rows at once, because detection is
+        # only reliable at file level — a single string cannot tell a corrupt
+        # 'Ú' from the one in 'El Último Viaje'. Money and identity codes are
+        # deliberately not touched.
+        repair_rows(lines, TEXT_FIELDS)
 
         return lines, detail_sum, embedded_total, len(lines)
     finally:

@@ -418,7 +418,13 @@ def test_upload_list_carries_pipeline_progress(client, session):
     uid = r.json()["upload_id"]
     upload = session.get(StatementUpload, uid)
     stats = dict(upload.stats or {})
-    stats["sort"] = {"statements": 2, "batches": 1}
+    stats["sort"] = {
+        "statements": 2, "batches": 1,
+        # Files the sort stage rejected. Counted here because they never
+        # become statements, so no parse counter can see them — a drop with
+        # every filename malformed otherwise reported a clean "Done".
+        "unparseable": ["random notes.pdf"], "unpaired": [], "duplicates": [],
+    }
     stats["parse"] = {"parsed": 1, "total": 2, "failed": 0}
     upload.stats = stats
     session.commit()
@@ -427,5 +433,9 @@ def test_upload_list_carries_pipeline_progress(client, session):
     row = next(x for x in rows if x["upload_id"] == uid)
     assert row["progress"] == {
         "sorted": 2, "batches": 1, "parsed": 1, "parse_total": 2, "parse_failed": 0,
+        "sort_unparseable": 1, "sort_unpaired": 0, "sort_duplicates": 0,
     }
     assert "received_files" not in str(row), "full stats blob must not leak into the list"
+    # Counts only: the rejected FILENAMES are a per-upload fetch
+    # (/uploads/{id}/failures), for the same reason the blob is kept out.
+    assert "random notes.pdf" not in str(row)

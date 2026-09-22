@@ -461,7 +461,11 @@ def _run_parse_stage(upload_id: int, session: Session) -> None:
             logger.error(f"Statement {statement_id} parse failed (upload {upload_id}): {error}")
             statement = session.get(Statement, statement_id)
             statement.parse_status = ParseStatus.FAILED
-            statement.parse_error = str(error)
+            # Truncate like every other write path does. An unbounded
+            # traceback here is what the failures report shows the admin, and
+            # on Postgres an oversized value fails the UPDATE outright —
+            # turning one bad statement into a dead parse stage.
+            statement.parse_error = str(error)[:1000]
             failed += 1
 
         since_commit += 1

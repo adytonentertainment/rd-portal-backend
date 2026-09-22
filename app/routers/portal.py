@@ -332,7 +332,20 @@ async def list_my_transactions(
         if writer_id not in scope_ids:
             raise HTTPException(status_code=404, detail="Writer not found")
         scope_ids = [writer_id]
+    return transactions_for_writers(db, scope_ids)
 
+
+def transactions_for_writers(db: Session, scope_ids: List[int]) -> List[Dict]:
+    """The earnings-visual aggregates for a set of writers.
+
+    Split out from the contact-scoped route above so the admin portal PREVIEW
+    can serve byte-identical data without a contact record. The preview exists
+    to show what the client sees; re-deriving it separately would mean two
+    aggregations that quietly disagree the first time either is touched.
+
+    The CALLER decides who may see these writers. This function only
+    aggregates — it performs no access check of its own.
+    """
     dists = (
         db.query(Distribution, Statement)
         .join(Statement, Distribution.statement_id == Statement.id)
@@ -493,7 +506,14 @@ async def my_earnings(
         if writer_id not in scope_ids:
             raise HTTPException(status_code=404, detail="Writer not found")
         scope_ids = [writer_id]
+    return earnings_for_writers(db, scope_ids)
 
+
+def earnings_for_writers(db: Session, scope_ids: List[int]) -> Dict:
+    """The payment waterfall for a set of writers. Scope-agnostic twin of the
+    route above, shared with the admin preview — see
+    :func:`transactions_for_writers` for why this is shared rather than
+    reimplemented."""
     rows = (
         db.query(Distribution, Statement)
         .join(Statement, Distribution.statement_id == Statement.id)

@@ -29,6 +29,9 @@ class EMail:
         # and EMAIL_FROM_NAME. Note the envelope sender stays the authenticated
         # mailbox; a From: the provider has not authorised will fail SPF/DKIM.
         self.from_email = settings.email_from or settings.email_username
+        # Falls back to the From address, so behaviour is unchanged until
+        # EMAIL_REPLY_TO is actually set.
+        self.reply_to = settings.email_reply_to or None
         self.from_name = settings.email_from_name
 
         self.serializer = URLSafeTimedSerializer(settings.secret_key)
@@ -77,7 +80,7 @@ class EMail:
         mimeMessage["To"] = to_addr
         mimeMessage["Subject"] = subject
         mimeMessage["From"] = from_addr
-        mimeMessage["Reply-To"] = f"{self.from_name} <{self.from_email}>"
+        mimeMessage["Reply-To"] = self.reply_to or f"{self.from_name} <{self.from_email}>"
         mimeMessage["Date"] = formatdate(localtime=True)
         mimeMessage["Message-ID"] = f"<{uuid.uuid4()}@{sender_domain}>"
         mimeMessage["MIME-Version"] = "1.0"
@@ -101,6 +104,7 @@ class EMail:
                     subject=subject,
                     html=message,
                     text=plain_text,
+                    reply_to=self.reply_to,
                 )
                 print(f"✓ Email sent to {receiver_email} via {provider.name}")
                 return

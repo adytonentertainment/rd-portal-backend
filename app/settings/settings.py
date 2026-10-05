@@ -260,6 +260,11 @@ class Settings(BaseSettings):
     # authenticate as one mailbox and send as another (an alias, or a shared
     # address like royalties@). Defaults to the login when unset.
     email_from: Optional[str] = None
+    # Where a human reply should land. The From address is pinned to the
+    # verified sending domain for DKIM, and that mailbox does not receive —
+    # so without this, a writer who hits Reply on their invite is writing to
+    # nobody. Unset falls back to the From address, i.e. previous behaviour.
+    email_reply_to: Optional[str] = None
     email_from_name: str = "Verax"
     # Delivery route: 'smtp' (the original mailbox) or a transactional provider
     # — resend / sendgrid / postmark. See app/emails/providers.py.

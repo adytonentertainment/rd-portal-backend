@@ -18,6 +18,7 @@ class _FakeSettings:
 def _mailer():
     m = EMail.__new__(EMail)
     m.from_name = "Regalias Digitales"
+    m.reply_to = None
     m.from_email = "royalties@regaliasdigitales.com"
     m.server = ""       # deliberately unset: a provider must not need SMTP
     m.port = 0
@@ -34,7 +35,7 @@ def test_provider_send_needs_no_smtp_settings(monkeypatch):
     class _P:
         name = "resend"
 
-        def send(self, *, sender, to, subject, html, text):
+        def send(self, *, sender, to, subject, html, text, reply_to=None):
             sent.update(sender=sender, to=to, subject=subject, html=html)
             return "msg_123"
 
@@ -52,7 +53,7 @@ def test_from_address_is_the_custom_domain(monkeypatch):
     class _P:
         name = "resend"
 
-        def send(self, *, sender, to, subject, html, text):
+        def send(self, *, sender, to, subject, html, text, reply_to=None):
             sent["sender"] = sender
             return "id"
 

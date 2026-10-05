@@ -20,6 +20,7 @@ def unconfigured(monkeypatch):
     mailer.password = ""
     mailer.from_email = ""
     mailer.from_name = ""
+    mailer.reply_to = None
     return mailer
 
 

@@ -24,6 +24,7 @@ def sent(monkeypatch):
     monkeypatch.setattr(EMail, "send_email", _capture)
     mailer = EMail.__new__(EMail)
     mailer.from_name = "Verax"
+    mailer.reply_to = None
     mailer.template_path = EMail.__init__.__globals__["os"].path.join(
         EMail.__init__.__globals__["os"].path.dirname(
             EMail.__init__.__globals__["__file__"]

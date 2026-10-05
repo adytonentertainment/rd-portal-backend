@@ -57,11 +57,16 @@ class ResendProvider:
     def __init__(self, api_key: str):
         self.api_key = api_key
 
-    def send(self, *, sender: str, to: str, subject: str, html: str, text: str) -> str:
+    def send(self, *, sender: str, to: str, subject: str, html: str, text: str,
+             reply_to: str = None) -> str:
         resp = _post(
             "https://api.resend.com/emails",
             headers={"Authorization": f"Bearer {self.api_key}"},
-            json={"from": sender, "to": [to], "subject": subject, "html": html, "text": text},
+            json={
+                "from": sender, "to": [to], "subject": subject,
+                "html": html, "text": text,
+                **({"reply_to": reply_to} if reply_to else {}),
+            },
             provider=self.name,
         )
         return (resp.json() or {}).get("id", "")
@@ -73,7 +78,8 @@ class SendGridProvider:
     def __init__(self, api_key: str):
         self.api_key = api_key
 
-    def send(self, *, sender: str, to: str, subject: str, html: str, text: str) -> str:
+    def send(self, *, sender: str, to: str, subject: str, html: str, text: str,
+             reply_to: str = None) -> str:
         name, address = _split_sender(sender)
         resp = _post(
             "https://api.sendgrid.com/v3/mail/send",
@@ -81,6 +87,7 @@ class SendGridProvider:
             json={
                 "personalizations": [{"to": [{"email": to}]}],
                 "from": {"email": address, "name": name} if name else {"email": address},
+                **({"reply_to": {"email": reply_to}} if reply_to else {}),
                 "subject": subject,
                 "content": [
                     # SendGrid requires plain text before html.
@@ -99,7 +106,8 @@ class PostmarkProvider:
     def __init__(self, api_key: str):
         self.api_key = api_key
 
-    def send(self, *, sender: str, to: str, subject: str, html: str, text: str) -> str:
+    def send(self, *, sender: str, to: str, subject: str, html: str, text: str,
+             reply_to: str = None) -> str:
         resp = _post(
             "https://api.postmarkapp.com/email",
             headers={
@@ -110,6 +118,7 @@ class PostmarkProvider:
                 "From": sender,
                 "To": to,
                 "Subject": subject,
+                **({"ReplyTo": reply_to} if reply_to else {}),
                 "HtmlBody": html,
                 "TextBody": text,
                 "MessageStream": "outbound",

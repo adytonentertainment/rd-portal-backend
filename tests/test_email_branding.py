@@ -46,12 +46,24 @@ def test_explicit_settings_win(no_branding, monkeypatch):
 
 
 def test_unset_keys_are_omitted_so_template_defaults_apply(no_branding):
-    """Returning empty strings would blank the footer and social link rather
-    than leaving the template's defaults in place."""
+    """Unset must leave the template's own defaults in place."""
     b = _mailer()._brand()
     assert "footer_text" not in b
     assert "social_url" not in b
     assert "social_label" not in b
+
+
+def test_explicitly_empty_suppresses_rather_than_falling_back(no_branding, monkeypatch):
+    """EMAIL_SOCIAL_URL="" means "no social link", NOT "use the default".
+
+    Treating empty as unset is what left a Verax Instagram link in the footer
+    of Regalias Digitales password resets: the blank was read as "unconfigured"
+    so the vendor default came back.
+    """
+    monkeypatch.setattr("app.emails.emails.settings.email_social_url", "", raising=False)
+    b = _mailer()._brand()
+    assert b["social_url"] == ""        # present, and empty
+    assert "social_label" not in b      # still unset, still defaulted
 
 
 def test_no_sender_name_leaves_everything_to_the_template(no_branding):

@@ -198,17 +198,32 @@ class EMail:
         changes for Verax. brand_name and the signoff fall back to
         EMAIL_FROM_NAME, which every deployment already sets correctly.
         """
-        values = {
-            "brand_name": settings.email_brand_name or self.from_name,
-            "signoff_name": (
-                settings.email_signoff_name
-                or (f"the {self.from_name} team" if self.from_name else None)
-            ),
-            "footer_text": settings.email_footer_text,
-            "social_url": settings.email_social_url,
-            "social_label": settings.email_social_label,
-        }
-        return {k: v for k, v in values.items() if v}
+        out = {}
+
+        # Identity: fall back to EMAIL_FROM_NAME, and omit entirely if there is
+        # nothing to say rather than rendering a blank brand.
+        brand = settings.email_brand_name or self.from_name
+        if brand:
+            out["brand_name"] = brand
+        signoff = settings.email_signoff_name or (
+            f"the {self.from_name} team" if self.from_name else None
+        )
+        if signoff:
+            out["signoff_name"] = signoff
+
+        # Optional text: UNSET (None) means "use the template's default";
+        # EXPLICITLY EMPTY ("") means "render nothing here". Collapsing those
+        # two is what left a Verax Instagram link in Regalias Digitales mail —
+        # EMAIL_SOCIAL_URL="" was read as unset, so the vendor default came
+        # back instead of suppressing the link.
+        for key, value in (
+            ("footer_text", settings.email_footer_text),
+            ("social_url", settings.email_social_url),
+            ("social_label", settings.email_social_label),
+        ):
+            if value is not None:
+                out[key] = value
+        return out
 
     def send_reset_password_email(self, user: User):
         print(f"[EMAIL] Starting send_reset_password_email for user: {user.username} ({user.email})")

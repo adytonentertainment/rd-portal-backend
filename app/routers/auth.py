@@ -10,6 +10,7 @@ from app.database.session import get_session
 from app.emails import get_email_client
 from app.logger import get_logger
 from app.middleware.account_lockout import account_lockout
+from app.services import throttle as throttle_svc
 from app.middleware.rate_limit import (
     check_rate_limit,
     login_rate_limiter,
@@ -691,6 +692,16 @@ async def login_user(
     await check_rate_limit(request, login_rate_limiter)
 
     # Check if account is locked
+    # Durable lockout. The in-memory check below still runs, but it is only a
+    # process-local cache now: it was erased by every deploy, so on its own it
+    # let an attacker simply wait for the next restart.
+    _locked = throttle_svc.locked_until(db, "lockout", form_data.username.lower())
+    if _locked:
+        mins = max(1, int((_locked - datetime.now()).total_seconds() // 60))
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many failed attempts. Try again in {mins} minute(s).",
+        )
     account_lockout.check_lockout(form_data.username)
 
     # Support login with username OR email
@@ -703,6 +714,10 @@ async def login_user(
     )
     if not user:
         # Record failed attempt even if user doesn't exist (prevent user enumeration)
+        throttle_svc.record_failure(
+            db, "lockout", form_data.username.lower(),
+            max_attempts=5, window=timedelta(minutes=15), lockout=timedelta(minutes=30),
+        )
         account_lockout.record_failed_attempt(form_data.username)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="User does not exist."
@@ -710,6 +725,10 @@ async def login_user(
 
     if not bcrypt_context.verify(form_data.password, user.hashed_password):
         # Record failed login attempt
+        throttle_svc.record_failure(
+            db, "lockout", form_data.username.lower(),
+            max_attempts=5, window=timedelta(minutes=15), lockout=timedelta(minutes=30),
+        )
         account_lockout.record_failed_attempt(form_data.username)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -717,6 +736,7 @@ async def login_user(
         )
 
     # Successful login - clear any failed attempts
+    throttle_svc.clear(db, "lockout", form_data.username.lower())
     account_lockout.record_successful_login(form_data.username)
 
     # user found, authenticate

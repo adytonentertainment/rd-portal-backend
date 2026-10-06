@@ -12,6 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.database import Base
 from app.models.models import User, Subscription, ACRCloudScan, Songs, UserCatalog, StatsCache
+# Registered so autogenerate and create_all see the table.
+from app.models.throttle import AuthThrottle  # noqa: F401
 from app.settings.settings import get_settings
 
 # this is the Alembic Config object, which provides

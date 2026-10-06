@@ -52,6 +52,13 @@ async def lifespan(app: FastAPI):
     stop_scheduler()
 
 
+# Error reporting. Started before the app exists so a fault during startup is
+# reported rather than only appearing in a log nobody is watching. No-ops when
+# SENTRY_DSN is unset.
+from app.monitoring.sentry import init_sentry  # noqa: E402
+
+init_sentry()
+
 # initialize application
 app = FastAPI(
     title="Verax Backend API",

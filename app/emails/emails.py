@@ -158,6 +158,7 @@ class EMail:
             file_content = f.read()
             template = self.jinja.from_string(file_content)
             html = template.render(
+                **self._brand(),
                 button_url=button_url,
             )
             self.send_email(user.email, user.username, title, html)
@@ -174,6 +175,7 @@ class EMail:
             file_content = f.read()
             template = self.jinja.from_string(file_content)
             html = template.render(
+                **self._brand(),
                 title=title,
                 message=message,
                 button=button,
@@ -181,6 +183,32 @@ class EMail:
                 base_url=settings.base_url_frontend,
                             )
             self.send_email(user.email, user.username, title, html)
+
+    def _brand(self) -> dict:
+        """Publisher branding for the shared HTML shell.
+
+        The template carries Verax defaults, which is correct for the Verax
+        product and wrong for every other publisher running this code: a
+        Regalias Digitales writer was getting a password reset signed "your
+        Verax Team" above a "Verax UG" copyright line, for a company they have
+        no relationship with.
+
+        Only keys that are actually configured are returned, so an unset
+        deployment falls through to the template's own defaults and nothing
+        changes for Verax. brand_name and the signoff fall back to
+        EMAIL_FROM_NAME, which every deployment already sets correctly.
+        """
+        values = {
+            "brand_name": settings.email_brand_name or self.from_name,
+            "signoff_name": (
+                settings.email_signoff_name
+                or (f"the {self.from_name} team" if self.from_name else None)
+            ),
+            "footer_text": settings.email_footer_text,
+            "social_url": settings.email_social_url,
+            "social_label": settings.email_social_label,
+        }
+        return {k: v for k, v in values.items() if v}
 
     def send_reset_password_email(self, user: User):
         print(f"[EMAIL] Starting send_reset_password_email for user: {user.username} ({user.email})")
@@ -199,6 +227,7 @@ class EMail:
             file_content = f.read()
             template = self.jinja.from_string(file_content)
             html = template.render(
+                **self._brand(),
                 title=title,
                 message=message,
                 button=button,
@@ -312,6 +341,9 @@ class EMail:
             # their royalties is the thing that gets it reported as phishing.
             year = expires_at.year if expires_at is not None else datetime.now().year
             html = template.render(
+                # No _brand() here: the invite derives its branding from the
+                # publisher record for this writer, which is more specific than
+                # the deployment-wide default.
                 title=title,
                 message=message,
                 button=button,
@@ -348,6 +380,7 @@ class EMail:
             file_content = f.read()
             template = self.jinja.from_string(file_content)
             html = template.render(
+                **self._brand(),
                 title=title,
                 message=message,
                 base_url=settings.base_url_frontend,

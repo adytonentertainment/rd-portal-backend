@@ -265,6 +265,17 @@ class Settings(BaseSettings):
     # so without this, a writer who hits Reply on their invite is writing to
     # nobody. Unset falls back to the From address, i.e. previous behaviour.
     email_reply_to: Optional[str] = None
+    # Branding for the shared HTML email shell. This codebase serves more
+    # than one publisher, so the template's Verax defaults must be
+    # overridable per deployment rather than edited in place — the RD
+    # portal was sending password resets signed 'your Verax Team' with a
+    # Verax UG copyright line, to writers who have never heard of Verax.
+    # Unset keeps the template's own defaults, so Verax is unaffected.
+    email_brand_name: Optional[str] = None
+    email_signoff_name: Optional[str] = None
+    email_footer_text: Optional[str] = None
+    email_social_url: Optional[str] = None
+    email_social_label: Optional[str] = None
     email_from_name: str = "Verax"
     # Delivery route: 'smtp' (the original mailbox) or a transactional provider
     # — resend / sendgrid / postmark. See app/emails/providers.py.

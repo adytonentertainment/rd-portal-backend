@@ -1,17 +1,36 @@
-# TuneScan Backend
+# RD Portal — backend
 
-FastAPI backend for TuneScan - A music analytics platform for tracking streaming metrics, royalties, and catalog performance.
+FastAPI backend for the Regalias Digitales royalty portal: an admin panel for
+publisher staff and a client-facing writer portal.
 
-## Features
+> **Orientation.** This repository also contains the Verax SaaS product, which
+> shares the codebase. Several features documented below (catalog analytics,
+> audio fingerprinting, Stripe subscriptions, agreement analysis) belong to
+> Verax and are **not used by the publisher portal**. If you are here for the
+> RD portal, start with:
+>
+> - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how the system fits together
+> - [`docs/DATABASE.md`](docs/DATABASE.md) — the schema, and which half of it matters
+> - [`DEPLOY.md`](DEPLOY.md) — how it is deployed and operated
 
-- **Music Catalog Management** - Track and manage your music catalog
-- **Streaming Analytics** - Real-time streaming data from Spotify, YouTube, and more
-- **Royalty Calculations** - Track earnings and royalty distributions
-- **Multi-Platform Integration** - Songstats, Soundcharts, ChartMetric, ACRCloud APIs
-- **Song Detection** - Audio fingerprinting via ACRCloud
-- **Payment Processing** - Stripe integration for subscriptions
-- **Background Jobs** - Automated daily data updates via APScheduler
-- **Security** - Rate limiting, account lockout, security headers
+## What the portal does
+
+- **Admin panel** — ingest royalty statement files, parse and reconcile them,
+  resolve which client each belongs to, and publish statements to writers
+- **Writer portal** — each client signs in and sees only their own royalties,
+  with territory and source breakdowns, and downloads the original PDF and XLSX
+- **Invite-only access** — writers are invited by an admin; there is no public
+  registration
+- **Bilingual** — English and Spanish, per recipient
+- **Multi-user per client** — a manager, attorney or business manager can each
+  hold their own credentials against the same client
+
+## Verax features (not used by the portal)
+
+- Music catalog management and streaming analytics
+- Audio fingerprinting via ACRCloud
+- Stripe subscriptions
+- Agreement analysis
 
 ## Tech Stack
 

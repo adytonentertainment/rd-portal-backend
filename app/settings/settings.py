@@ -276,6 +276,11 @@ class Settings(BaseSettings):
     email_footer_text: Optional[str] = None
     email_social_url: Optional[str] = None
     email_social_label: Optional[str] = None
+    # Whether the footer carries a social link at all. Render will not
+    # store an empty env var, so EMAIL_SOCIAL_URL="" cannot be used to
+    # switch it off — a publisher deployment needs an explicit flag, or it
+    # keeps falling through to the vendor's Instagram.
+    email_show_social: bool = True
     email_from_name: str = "Verax"
     # Delivery route: 'smtp' (the original mailbox) or a transactional provider
     # — resend / sendgrid / postmark. See app/emails/providers.py.

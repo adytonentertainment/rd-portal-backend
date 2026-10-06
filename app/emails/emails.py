@@ -223,6 +223,13 @@ class EMail:
         ):
             if value is not None:
                 out[key] = value
+
+        # EMAIL_SHOW_SOCIAL=false blanks the link outright. The portal invite
+        # already made this call for publisher mail ("no vendor social link on
+        # a publisher's mail"); this lets every other template follow it.
+        if not settings.email_show_social:
+            out["social_url"] = ""
+            out["social_label"] = ""
         return out
 
     def send_reset_password_email(self, user: User):

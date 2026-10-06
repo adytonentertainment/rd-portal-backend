@@ -281,6 +281,13 @@ class Settings(BaseSettings):
     # switch it off — a publisher deployment needs an explicit flag, or it
     # keeps falling through to the vendor's Instagram.
     email_show_social: bool = True
+    # SAFETY CATCH. While set, mail is delivered ONLY to these addresses
+    # (comma-separated) and silently dropped for everyone else. This is for
+    # a deployment that is live and reachable but not yet ready to contact
+    # real clients: public registration, password resets and portal invites
+    # all send mail, and a writer who receives an invite before the data
+    # behind it is correct cannot be un-invited. Clear it to go live.
+    email_allowlist: Optional[str] = None
     email_from_name: str = "Verax"
     # Delivery route: 'smtp' (the original mailbox) or a transactional provider
     # — resend / sendgrid / postmark. See app/emails/providers.py.

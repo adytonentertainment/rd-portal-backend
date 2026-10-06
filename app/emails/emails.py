@@ -8,12 +8,16 @@ from smtplib import SMTP
 from urllib.parse import urljoin
 
 import jinja2
+from app.logger.logger import get_logger
 from app.models import User
 from app.emails.providers import get_provider
 from app.settings import get_settings
 from itsdangerous import URLSafeTimedSerializer
 
 settings = get_settings()
+
+
+logger = get_logger("emails")
 
 
 class EMail:
@@ -65,8 +69,35 @@ class EMail:
         text = re.sub(r'\n{3,}', '\n\n', text)
         return text.strip()
 
+    def _blocked_by_allowlist(self, receiver_email: str) -> bool:
+        """True when EMAIL_ALLOWLIST is set and this recipient is not on it.
+
+        Enforced here because this is the single point every email in the system
+        passes through, so nothing can route around it by calling a provider
+        directly.
+
+        Dropping is deliberate rather than raising: a password reset that
+        refuses to send would surface to the user as a broken portal, and the
+        caller cannot do anything useful with the failure. The drop is logged
+        at warning level so it is visible in the service logs.
+        """
+        raw = (settings.email_allowlist or "").strip()
+        if not raw:
+            return False
+        allowed = {a.strip().lower() for a in raw.split(",") if a.strip()}
+        if (receiver_email or "").strip().lower() in allowed:
+            return False
+        logger.warning(
+            f"EMAIL_ALLOWLIST active: dropped mail to {receiver_email}"
+        )
+        return True
+
     def send_email(self, receiver_email, receiver_name, subject, message):
         import uuid
+
+        # Safety catch before anything is built or sent.
+        if self._blocked_by_allowlist(receiver_email):
+            return
         to_addr = f"{receiver_name} <{receiver_email}>"
         from_addr = f"{self.from_name} <{self.from_email}>"
 

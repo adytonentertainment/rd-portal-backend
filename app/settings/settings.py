@@ -288,6 +288,14 @@ class Settings(BaseSettings):
     # all send mail, and a writer who receives an invite before the data
     # behind it is correct cannot be un-invited. Clear it to go live.
     email_allowlist: Optional[str] = None
+    # Whether anyone may create an account by hitting the registration
+    # endpoint. A publisher portal is invite-only: writers get an account
+    # by redeeming a PortalInvite, which creates the login itself and does
+    # not go through registration at all. Leaving registration open gave
+    # anyone on the internet an account for the cost of one request, which
+    # is how a previous deployment collected ~80 junk accounts in half an
+    # hour. Default True so the Verax SaaS product is unaffected.
+    allow_public_registration: bool = True
     email_from_name: str = "Verax"
     # Delivery route: 'smtp' (the original mailbox) or a transactional provider
     # — resend / sendgrid / postmark. See app/emails/providers.py.

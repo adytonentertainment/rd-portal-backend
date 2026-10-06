@@ -115,6 +115,20 @@ async def create_user(
     request: Request,
     db: Session = Depends(get_session),
 ):
+    # Invite-only deployments refuse here, before any rate limit, captcha or
+    # beta check — all of which are conditional on `mode` and none of which
+    # were actually running in production: the passphrase gate below is wrapped
+    # in `mode == "development"`, and mode defaults to "production", so it has
+    # never once applied where it matters. This check is unconditional.
+    if not settings.allow_public_registration:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Registration is by invitation only. "
+                "Use the link in your invitation email to set up access."
+            ),
+        )
+
     # Rate limiting
     await check_rate_limit(request, signup_rate_limiter)
     """

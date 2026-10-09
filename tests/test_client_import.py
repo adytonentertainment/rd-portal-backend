@@ -254,3 +254,11 @@ def test_exact_row_beats_group_sweep(session):
     assert owner_of("C00139f") == "Edipurepecha"
     assert owner_of("C00139k") == "Agave"
     assert owner_of("C00139") == "Abel De Luna (Luna Negra)"  # named by its own row
+
+
+def test_normalize_joins_dotted_initials_only():
+    from app.services.client_import.matcher import normalize
+    assert normalize("T.K.") == normalize("TK") == "tk"
+    assert normalize("E.D.I. / Outlawz") == "edi outlawz"
+    assert normalize("J.Balvin") == "j balvin"  # not initials: left split
+    assert normalize("3.5 Records") == "3 5 records"  # numbers untouched

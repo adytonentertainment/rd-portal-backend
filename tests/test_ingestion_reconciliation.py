@@ -118,3 +118,21 @@ def test_reconcile_detects_a_stolen_account(client, session):
     assert report["ok"] is False
     assert report["violation_counts"]["exact_owner"] == 1
     assert report["violations"]["exact_owner"][0]["account"] == "C00650"
+
+
+def test_reconcile_treats_dotted_initials_as_the_same_name(client, session):
+    """TK's accounts are issued to "TK" but sit on a writer stored as "T.K.",
+    while a duplicate "TK" record also exists. Same person, different spelling
+    — not money on the wrong writer, so it must not be flagged."""
+    _ingest_fixtures(client)
+    acct = session.query(BeneficiaryAccount).filter(
+        BeneficiaryAccount.account_code == "C00650").one()
+    owner = session.get(Writer, acct.writer_id)
+    session.add(Writer(publisher_id=owner.publisher_id, canonical_name="TK"))
+    owner.canonical_name = "T.K."
+    owner.payee_name = None
+    acct.display_name = "TK"
+    session.commit()
+
+    report = reconcile_ingestion(session)
+    assert report["violation_counts"]["exact_owner"] == 0

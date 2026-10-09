@@ -33,6 +33,11 @@ _LEGAL_SUFFIXES = {
 _STOPWORDS = {"the", "and", "&"}
 _PAREN_RE = re.compile(r"\(([^)]*)\)")
 _NONWORD_RE = re.compile(r"[^a-z0-9\s]")
+# Dotted initials ("t.k.", "e.d.i") — single letters joined by periods. Joined
+# before punctuation becomes spaces, so "T.K." reads as "tk" like "TK" does
+# rather than as two one-letter words. "j.balvin" is untouched: "balvin" is
+# not a single letter.
+_INITIALS_RE = re.compile(r"\b(?:[a-z]\.)+[a-z]\b\.?")
 
 
 def strip_accents(s: str) -> str:
@@ -44,6 +49,7 @@ def strip_accents(s: str) -> str:
 def normalize(name: str) -> str:
     """Canonical form for exact comparison."""
     s = strip_accents(name or "").lower()
+    s = _INITIALS_RE.sub(lambda m: m.group(0).replace(".", ""), s)
     s = _NONWORD_RE.sub(" ", s)
     tokens = [t for t in s.split() if t and t not in _STOPWORDS]
     return " ".join(tokens)

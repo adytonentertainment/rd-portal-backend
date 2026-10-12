@@ -7,15 +7,12 @@ from app.database import create_tables
 from app.logger import get_logger, setup_logging
 from app.middleware import PerformanceMonitoringMiddleware, SecurityHeadersMiddleware
 from app.routers import api_router
-from app.routers.prelaunch import prelaunch_router
-from app.services.scheduled_tasks import start_scheduler, stop_scheduler
 from app.services.statement_ingest.runner import start_ingest_worker, stop_ingest_worker
 from app.settings import get_settings
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from starlette.types import ASGIApp, Receive, Scope, Send
 from fastapi.responses import JSONResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -36,8 +33,6 @@ os.makedirs(uploads_dir, exist_ok=True)
 async def lifespan(app: FastAPI):
     """Application lifespan events for startup and shutdown."""
     # Startup
-    logger.info("Starting notification scheduler...")
-    start_scheduler()
     # Statement ingest: without a running worker an upload is accepted, written
     # to disk, and then silently never processed. Starting it here means the
     # pipeline cannot be missing just because a deploy didn't launch a separate
@@ -48,8 +43,6 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Stopping statement ingest worker...")
     stop_ingest_worker()
-    logger.info("Stopping notification scheduler...")
-    stop_scheduler()
 
 
 # Error reporting. Started before the app exists so a fault during startup is
@@ -105,10 +98,7 @@ origins = [
 ]
 
 
-if settings.pre_launch:
-    app.include_router(prelaunch_router)
-else:
-    app.include_router(api_router)
+app.include_router(api_router)
 
 
 # Validation error handler to return user-friendly error messages
@@ -184,15 +174,8 @@ if settings.mode == "development":
 # Add security headers middleware
 app.add_middleware(SecurityHeadersMiddleware)
 
-# Add GZip compression for responses (skip SSE endpoints to prevent buffering)
-class SSEAwareGZipMiddleware(GZipMiddleware):
-    async def __call__(self, scope: Scope, receive: Receive, send: Send):
-        if scope["type"] == "http" and "/genius-stream/" in scope.get("path", ""):
-            await self.app(scope, receive, send)
-        else:
-            await super().__call__(scope, receive, send)
-
-app.add_middleware(SSEAwareGZipMiddleware, minimum_size=1000)
+# Add GZip compression for responses
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # Trust proxy headers from nginx
 app.add_middleware(

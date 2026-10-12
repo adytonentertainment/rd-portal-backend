@@ -9,9 +9,10 @@ they matter, none of them ran.
 That is the shape of the attack this client has already suffered once: roughly
 80 junk accounts created in half an hour.
 
-The pair of tests that matter here are the refusal AND the invite path still
-working — a lockdown that also blocks invited writers is not a fix, it is an
-outage.
+That legacy SaaS signup (`POST /auth/user`, which also created a Stripe
+customer) has since been removed outright. These tests pin that it stays gone
+AND that the invite path still works — a lockdown that also blocks invited
+writers is not a fix, it is an outage.
 """
 
 import pytest
@@ -30,43 +31,14 @@ def client(session):
     return TestClient(app)
 
 
-def _payload(email="stranger@example.com"):
-    # captchaToken is required by the schema, so FastAPI validates it before
-    # the endpoint runs. Supplying it proves the 403 comes from the invite-only
-    # gate and not from body validation.
-    return {
-        "email": email,
-        "username": "stranger",
-        "password": "Testing123!x",
-        "captchaToken": "test-token",
-    }
-
-
-def test_registration_is_refused_when_invite_only(client, monkeypatch):
-    monkeypatch.setattr("app.routers.auth.settings.allow_public_registration", False, raising=False)
-    r = client.post("/auth/user", json=_payload())
-    assert r.status_code == 403
-    # The message has to tell a confused writer what to do instead.
-    assert "invitation" in r.json()["detail"].lower()
-
-
-def test_refusal_happens_before_anything_else(client, monkeypatch):
-    """The gate must not sit behind the rate limiter or captcha, both of which
-    are conditional and neither of which was running in production."""
-    monkeypatch.setattr("app.routers.auth.settings.allow_public_registration", False, raising=False)
-    # Ten rapid attempts: every one should be a flat 403, never a 429 or a 400
-    # about captcha, which would mean the request got past the gate.
-    codes = {client.post("/auth/user", json=_payload(f"a{i}@example.com")).status_code
-             for i in range(10)}
-    assert codes == {403}
-
-
-def test_registration_still_works_when_enabled(client, monkeypatch):
-    """Default stays open so the Verax SaaS product is unaffected; this asserts
-    the gate is the only thing standing in the way."""
-    monkeypatch.setattr("app.routers.auth.settings.allow_public_registration", True, raising=False)
-    r = client.post("/auth/user", json=_payload())
-    assert r.status_code != 403
+def test_legacy_signup_endpoint_is_gone(client):
+    r = client.post(
+        "/auth/user",
+        json={"email": "stranger@example.com", "username": "stranger",
+              "password": "Testing123!x", "captchaToken": "test-token"},
+    )
+    # GET/PATCH/DELETE /auth/user (profile) remain; POST must not create anyone.
+    assert r.status_code == 405
 
 
 def test_the_invite_path_does_not_go_through_registration():

@@ -23,6 +23,9 @@ def client(session, monkeypatch):
     monkeypatch.setattr(accounts_mod, "check_rate_limit", _noop)
     monkeypatch.setenv("ADMIN_SIGNUP_CODE", "letmein")
     monkeypatch.setenv("ADMIN_EMAILS", "boss@verax.app")
+    from app.settings.settings import get_settings
+
+    get_settings().allow_public_registration = True
 
     app = FastAPI()
     app.include_router(accounts_router)

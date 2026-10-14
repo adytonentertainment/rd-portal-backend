@@ -13,20 +13,19 @@ Verax accounts don't need that machinery.
 """
 
 import os
-from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from jose import jwt
 from pydantic import BaseModel, EmailStr, field_validator
 from sqlalchemy.orm import Session
 from starlette import status
 
 from app.database.session import get_session
+from app.settings.settings import get_settings
 from app.logger.logger import get_logger
 from app.middleware.rate_limit import check_rate_limit, signup_rate_limiter
 from app.models.models import User
-from app.routers.auth import ALGORITHM, SECRET_KEY, bcrypt_context, get_user
+from app.routers.auth import bcrypt_context, get_user, mint_session_token
 from app.routers.statements_admin import require_admin
 from app.utils.password_validator import validate_password
 from app.utils.roles import is_bootstrap_admin_email, is_effective_admin
@@ -68,13 +67,7 @@ class RegisterRequest(BaseModel):
 
 
 def _mint_token(user: User) -> str:
-    payload = {
-        "sub": user.username,
-        "id": user.id,
-        "email": user.email,
-        "exp": datetime.now() + timedelta(days=7),
-    }
-    return jwt.encode(payload, key=SECRET_KEY, algorithm=ALGORITHM)
+    return mint_session_token(user)
 
 
 def _user_out(user: User) -> dict:
@@ -98,6 +91,11 @@ async def register(
     db: Session = Depends(get_session),
 ):
     """Create a Verax admin or writer account."""
+    # Writer accounts are invite-only unless open signup is turned on. Admin
+    # signup stays available: the first admin is created here with
+    # ADMIN_SIGNUP_CODE, and the code check below still applies.
+    if not get_settings().allow_public_registration and body.role != "admin":
+        raise HTTPException(status_code=403, detail="Registration is invite-only.")
     await check_rate_limit(request, signup_rate_limiter)
 
     email = body.email.lower()

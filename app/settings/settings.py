@@ -294,8 +294,9 @@ class Settings(BaseSettings):
     # not go through registration at all. Leaving registration open gave
     # anyone on the internet an account for the cost of one request, which
     # is how a previous deployment collected ~80 junk accounts in half an
-    # hour. Default True so the Verax SaaS product is unaffected.
-    allow_public_registration: bool = True
+    # hour. Default False: a publisher portal is invite-only. Set
+    # ALLOW_PUBLIC_REGISTRATION=true only where open signup is intended.
+    allow_public_registration: bool = False
     email_from_name: str = "Verax"
     # Delivery route: 'smtp' (the original mailbox) or a transactional provider
     # — resend / sendgrid / postmark. See app/emails/providers.py.

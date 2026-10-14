@@ -26,8 +26,15 @@ class UploadStreamError(Exception):
 
 
 def _safe_name(raw: str) -> str:
-    """Filename only — never a client-supplied path."""
-    return os.path.basename((raw or "").replace("\\", "/")).strip()
+    """Filename only — never a client-supplied path.
+
+    basename turns `../../etc/passwd` into `passwd`, but a file whose name is
+    `..` survives that and `os.path.join(dir, '..')` steps out of the folder.
+    """
+    name = os.path.basename((raw or "").replace("\\", "/")).strip()
+    if name in {".", ".."}:
+        return ""
+    return name
 
 
 class _PartWriter:

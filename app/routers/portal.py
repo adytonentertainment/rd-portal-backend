@@ -49,7 +49,8 @@ from app.models.statements import (
     WriterContact,
     WriterStatus,
 )
-from app.routers.auth import ALGORITHM, SECRET_KEY, bcrypt_context, get_user
+from app.routers.auth import ALGORITHM, SECRET_KEY, bcrypt_context, get_user, mint_session_token
+from app.utils.password_stamp import password_stamp
 from app.routers.statements_admin import require_admin
 from app.services.portal import invites as invite_svc
 from app.services.statement_ingest.storage import resolve_stored_path
@@ -196,13 +197,7 @@ def _writer_card(db: Session, writer: Writer, contact: Contact = None) -> dict:
 
 
 def _mint_token(user: User) -> str:
-    payload = {
-        "sub": user.username,
-        "id": user.id,
-        "email": user.email,
-        "exp": datetime.now() + timedelta(days=7),
-    }
-    return jwt.encode(payload, key=SECRET_KEY, algorithm=ALGORITHM)
+    return mint_session_token(user)
 
 
 # --- contact-scoped: /me -----------------------------------------------------
@@ -1052,10 +1047,11 @@ async def preview_invite(token: str, db: Session = Depends(get_session)):
     }
 
 
-def _authenticated_email(request: Request) -> Optional[str]:
+def _authenticated_email(request: Request, db: Session) -> Optional[str]:
     """Email of the caller IF they present a valid session, else None. Never
     raises: the accept-invite flow is public, and being signed in is only one of
-    the ways to prove you own an already-registered email."""
+    the ways to prove you own an already-registered email. A token issued before
+    the password changed does not count."""
     header = request.headers.get("authorization") or ""
     if not header.lower().startswith("bearer "):
         return None
@@ -1063,7 +1059,13 @@ def _authenticated_email(request: Request) -> Optional[str]:
         payload = jwt.decode(header[7:].strip(), SECRET_KEY, algorithms=[ALGORITHM])
     except Exception:
         return None
-    return payload.get("email")
+    email = payload.get("email")
+    if not email:
+        return None
+    user = db.query(User).filter(User.email == email).first()
+    if not user or payload.get("pwd") != password_stamp(user.hashed_password):
+        return None
+    return email
 
 
 @portal_router.post("/accept-invite")
@@ -1084,7 +1086,7 @@ async def accept_invite(
             body.token,
             body.password,
             bcrypt_context,
-            authenticated_email=_authenticated_email(request),
+            authenticated_email=_authenticated_email(request, db),
             username=body.username,
         )
     except invite_svc.UsernameTaken as e:

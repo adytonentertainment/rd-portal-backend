@@ -73,17 +73,9 @@ _extra_origins = [
 ]
 
 origins = [
-    "http://localhost:3000",
-    "http://localhost:3001",
-    "http://127.0.0.1:3000",
-    "http://127.0.0.1:3001",
     # RENDER TEST
     "https://r.verax.app",
     "https://www.r.verax.app",
-    # LOCAL NETWORK ACCESS
-    "http://192.168.1.133:3000",  # Backend IP
-    "http://192.168.8.114:3000",  # Frontend IP
-    "http://192.168.1.100:3000",  # Previous network IP
     # PRODUCTION
     "https://verax.app",
     "https://www.verax.app",
@@ -205,6 +197,19 @@ app.add_middleware(
         *[h.strip() for h in (os.getenv("EXTRA_ALLOWED_HOSTS") or "").split(",") if h.strip()],
     ],
 )
+
+# Local dev servers. A production deploy sets ENVIRONMENT=PRODUCTION and does
+# not allow them. settings.mode is not the signal: it defaults to "production"
+# even for a development process, which would drop localhost and break local login.
+if (os.getenv("ENVIRONMENT") or "").upper() != "PRODUCTION":
+    origins.extend(
+        [
+            "http://localhost:3000",
+            "http://localhost:3001",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:3001",
+        ]
+    )
 
 origins.extend(_extra_origins)
 

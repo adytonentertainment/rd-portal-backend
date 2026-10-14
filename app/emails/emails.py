@@ -12,6 +12,7 @@ from app.logger.logger import get_logger
 from app.models import User
 from app.emails.providers import get_provider
 from app.settings import get_settings
+from app.utils.password_stamp import password_stamp
 from itsdangerous import URLSafeTimedSerializer
 
 settings = get_settings()
@@ -266,9 +267,16 @@ class EMail:
     def send_reset_password_email(self, user: User):
         print(f"[EMAIL] Starting send_reset_password_email for user: {user.username} ({user.email})")
         print(f"[EMAIL] SMTP Config - Server: {self.server}, Port: {self.port}, User: {self.email}")
-        token = self.serializer.dumps(user.email, salt="auth")
+        token = self.serializer.dumps(
+            {"e": user.email, "p": password_stamp(user.hashed_password)},
+            salt="auth",
+        )
 
-        message = f"Dear {user.username},<br><br>You have requested a password reset. Click the button below to set a new password."
+        message = (
+            f"Dear {user.username},<br><br>You have requested a password reset. "
+            "Click the button below to set a new password. "
+            "This link expires in one hour and works only once."
+        )
         button = "Reset Password"
         button_url = urljoin(
             settings.base_url_frontend, f"/resetPassword?token={token}"

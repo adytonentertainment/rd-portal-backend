@@ -56,18 +56,38 @@ def to_storage_relative(path: str) -> str:
     return normalized
 
 
+def _inside_storage(resolved: str, root: str) -> bool:
+    return resolved == root or resolved.startswith(root + os.sep)
+
+
 def resolve_stored_path(path: str) -> str:
-    """Turn a stored path into a real filesystem path.
+    """Turn a stored path into a filesystem path under the storage root.
 
     Handles both forms on purpose: rows written before this change still hold
     absolute paths, and re-pointing them is a data migration that must not be a
-    prerequisite for the app serving files correctly.
+    prerequisite for the app serving files correctly. An absolute path that
+    exists outside the storage root is not served. `..` cannot walk out either.
+    Returns "" when the path is not inside the root; callers treat that as missing.
+
+    The returned string keeps the configured root (it is not passed through
+    realpath). realpath is only the containment check, so a symlink such as
+    /var -> /private/var does not change the path callers already compare.
     """
     if not path:
         return path
-    if os.path.isabs(path):
-        if os.path.exists(path):
-            return path
-        # Absolute, but from a different machine — reinterpret under this root.
-        return os.path.join(get_storage_root(), to_storage_relative(path))
-    return os.path.join(get_storage_root(), path)
+    root_raw = os.path.normpath(get_storage_root())
+    root = os.path.realpath(root_raw)
+    normalized = os.path.normpath(path)
+    if os.path.isabs(normalized) and os.path.exists(normalized):
+        logical = normalized
+    elif os.path.isabs(normalized):
+        relative = to_storage_relative(normalized)
+        if os.path.isabs(relative):
+            logical = relative
+        else:
+            logical = os.path.normpath(os.path.join(root_raw, relative))
+    else:
+        logical = os.path.normpath(os.path.join(root_raw, normalized))
+    if not _inside_storage(os.path.realpath(logical), root):
+        return ""
+    return logical

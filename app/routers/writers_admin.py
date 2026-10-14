@@ -1102,8 +1102,12 @@ async def reset_all_data(
     statements, batches, uploads, distributions, contacts, invites, client
     imports) so a tester can start from a clean slate. Refused in PRODUCTION.
     Users and the publisher are preserved so the admin stays logged in."""
+    # Refuse on a production deploy, and when MODE is explicitly production.
+    # settings.mode defaults to "production" even in development, so an unset
+    # MODE must not block the local/staging wipe.
     env = (os.getenv("ENVIRONMENT") or "").upper()
-    if env == "PRODUCTION":
+    explicit_mode = (os.getenv("MODE") or "").lower()
+    if env == "PRODUCTION" or explicit_mode == "production":
         raise HTTPException(status_code=403, detail="Data reset is disabled in production")
     deleted = {}
     for table in _RESET_TABLES:
@@ -1127,7 +1131,10 @@ async def reset_all_data(
     except OSError as exc:
         logger.warning(f"reset: could not fully clear storage root {root}: {exc}")
 
-    logger.warning(f"admin {user.id} reset ALL client/statement data ({env or 'unknown env'})")
+    logger.warning(
+        f"admin {user.id} reset ALL client/statement data "
+        f"(environment={env or 'unset'}, mode={explicit_mode or 'unset'})"
+    )
     return {"status": "reset", "deleted": deleted}
 
 

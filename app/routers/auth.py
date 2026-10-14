@@ -35,6 +35,7 @@ from app.schemas.auth import (
 )
 from app.schemas.user import UpdateUserRequest
 from app.settings.settings import get_settings
+from app.utils.password_stamp import password_stamp
 from app.utils.password_validator import MIN_LENGTH, get_password_requirements
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
@@ -53,6 +54,27 @@ auth_s = URLSafeTimedSerializer(settings.secret_key, "auth")
 # put this in env file
 SECRET_KEY = settings.secret_key
 ALGORITHM = settings.secret_algorithm
+# Reset links are single-use because they carry the password stamp, and they
+# expire. An hour is long enough to open the email and short enough that a
+# forwarded or logged link does not work forever.
+PASSWORD_RESET_MAX_AGE = 60 * 60
+
+
+def mint_session_token(user: User) -> str:
+    """Bearer token. `pwd` dies when hashed_password changes."""
+    payload = {
+        "sub": user.username,
+        "id": user.id,
+        "email": user.email,
+        "exp": datetime.now() + timedelta(days=7),
+        "pwd": password_stamp(user.hashed_password),
+    }
+    return jwt.encode(payload, key=SECRET_KEY, algorithm=ALGORITHM)
+
+
+def _reject_stale_token(user: User, payload: dict) -> None:
+    if payload.get("pwd") != password_stamp(user.hashed_password):
+        raise HTTPException(status_code=403, detail="Token is invalid or expired")
 
 auth_router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -97,6 +119,7 @@ async def get_user(
         if not user:
             logger.warning(f"Token valid but user not found: {username}")
             raise HTTPException(status_code=403, detail="Token is invalid or expired")
+        _reject_stale_token(user, payload)
         return user
     except JWTError:
         # Expected for expired/invalid tokens - no need to log
@@ -319,6 +342,8 @@ async def delete_user(
 
         # user is legit, delete him with all the corresponding resources
         user = db.query(User).filter(User.username == username).first()
+        if user:
+            _reject_stale_token(user, payload)
 
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -445,13 +470,7 @@ async def login_user(
     account_lockout.record_successful_login(form_data.username)
 
     # user found, authenticate
-    encode = {"sub": user.username, "id": user.id, "email": user.email}
-    expires = datetime.now() + timedelta(days=7)
-    encode.update({"exp": expires})
-    return {
-        "access_token": jwt.encode(encode, key=SECRET_KEY, algorithm=ALGORITHM),
-        "token_type": "bearer",
-    }
+    return {"access_token": mint_session_token(user), "token_type": "bearer"}
 
 
 @auth_router.post("/resend-verification", status_code=status.HTTP_200_OK)
@@ -524,10 +543,21 @@ async def reset_password(
     # reset via email
     if password_data.password_new != password_data.password_new_retyped:
         raise HTTPException(status_code=400, detail="Passwords do not match.")
-    user_email = auth_s.loads(password_data.token)
+    try:
+        data = auth_s.loads(password_data.token, max_age=PASSWORD_RESET_MAX_AGE)
+    except SignatureExpired:
+        raise HTTPException(status_code=400, detail="This reset link has expired.")
+    except BadSignature:
+        raise HTTPException(status_code=400, detail="This reset link is not valid.")
+    # Older links were the bare email and never expired. They are rejected.
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="This reset link has expired.")
+    user_email = data.get("e")
     user = db.query(User).filter(User.email == user_email).first()
     if not user:
         raise HTTPException(status_code=400, detail="User not found.")
+    if data.get("p") != password_stamp(user.hashed_password):
+        raise HTTPException(status_code=400, detail="This reset link has already been used.")
 
     user.hashed_password = bcrypt_context.hash(password_data.password_new)
     db.commit()
@@ -564,18 +594,22 @@ async def send_reset_password_email(
 
 
 # call this when opening a protected route
-def _decode_session_token(token: str) -> dict:
+def _decode_session_token(token: str, db: Session) -> dict:
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
     except JWTError:
         raise HTTPException(status_code=403, detail="Token is invalid or expired")
     if payload.get("sub") is None:
         raise HTTPException(status_code=403, detail="Token is invalid or expired")
+    user = db.query(User).filter(User.username == payload.get("sub")).first()
+    if not user:
+        raise HTTPException(status_code=403, detail="Token is invalid or expired")
+    _reject_stale_token(user, payload)
     return payload
 
 
 @auth_router.get("/verify-token")
-async def verify_token_header(request: Request):
+async def verify_token_header(request: Request, db: Session = Depends(get_session)):
     """Validate the caller's session, taking the token from the Authorization
     header.
 
@@ -587,14 +621,4 @@ async def verify_token_header(request: Request):
     header = request.headers.get("authorization") or ""
     if not header.lower().startswith("bearer "):
         raise HTTPException(status_code=403, detail="Token is invalid or expired")
-    return _decode_session_token(header[7:].strip())
-
-
-@auth_router.get("/verify-token/{token}", deprecated=True)
-async def verify_token(token: str):
-    """DEPRECATED — use GET /auth/verify-token with an Authorization header.
-
-    Kept only so an older client build keeps working through a deploy; it leaks
-    the token into access logs by construction. Remove once no client calls it.
-    """
-    return _decode_session_token(token)
+    return _decode_session_token(header[7:].strip(), db)

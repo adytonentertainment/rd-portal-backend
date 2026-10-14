@@ -48,7 +48,7 @@ def fk_session(session):
 @pytest.fixture()
 def client(fk_session, monkeypatch):
     monkeypatch.setenv("ADMIN_EMAILS", ADMIN_EMAIL)
-    monkeypatch.setenv("ENVIRONMENT", "STAGING")
+    monkeypatch.setenv("MODE", "development")
     u = User(email=ADMIN_EMAIL, username="admin", royalty_per_stream=0)
     fk_session.add(u)
     fk_session.commit()

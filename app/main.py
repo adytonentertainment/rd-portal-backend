@@ -170,10 +170,11 @@ app.add_middleware(
     ],
 )
 
-# Local dev servers. A production deploy sets ENVIRONMENT=PRODUCTION and does
-# not allow them. settings.mode is not the signal: it defaults to "production"
-# even for a development process, which would drop localhost and break local login.
-if (os.getenv("ENVIRONMENT") or "").upper() != "PRODUCTION":
+# Local dev servers, allowed only when ENVIRONMENT is explicitly DEVELOPMENT.
+# Fails closed: the live deploy has run as STAGING, and any value other than
+# DEVELOPMENT must not open the API to pages served from localhost.
+# settings.mode is not the signal: it defaults to "production" everywhere.
+if (os.getenv("ENVIRONMENT") or "").upper() == "DEVELOPMENT":
     origins.extend(
         [
             "http://localhost:3000",

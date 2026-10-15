@@ -12,14 +12,13 @@ in `portal.py`; the one admin-only gap this file fills is a thin contact-unlink
 and an admin invite-revoke (portal.py's revoke is contact-self-service).
 """
 
-import os
 from datetime import datetime
 from decimal import Decimal
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import and_, func, or_, text
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from app.database.session import get_session
@@ -1066,76 +1065,6 @@ async def create_writer(
     db.refresh(writer)
     logger.info(f"admin {user.id} created writer {writer.id} ({name})")
     return await get_writer(writer.id, user=user, db=db)
-
-
-# Tables wiped by the testing reset, in FK-safe order (children first). Keeps
-# User (logins) and Publisher so the admin can immediately re-ingest.
-_RESET_TABLES = [
-    "statement_line",
-    "validation_finding",
-    "validation_run",
-    "distribution",
-    "statement",
-    "statement_batch",
-    "beneficiary_account",
-    "portal_invite",
-    "writer_contact",
-    "contact",
-    # Before `writer`, and easy to forget: aliases point at it. SQLite does not
-    # enforce foreign keys by default, so leaving this out passed locally and
-    # failed on Postgres, where the reset died half-done with the roster already
-    # gone. Anything with a FK into this list has to be cleared before its
-    # parent — see test_reset_all_data.
-    "writer_alias",
-    "writer",
-    "client_import",
-    "statement_upload",
-]
-
-
-@writers_admin_router.post("/reset-all")
-async def reset_all_data(
-    user: User = Depends(require_admin),
-    db: Session = Depends(get_session),
-):
-    """DEV/testing only: wipe all client + statement data (clients, accounts,
-    statements, batches, uploads, distributions, contacts, invites, client
-    imports) so a tester can start from a clean slate. Refused in PRODUCTION.
-    Users and the publisher are preserved so the admin stays logged in."""
-    # Refuse on a production deploy, and when MODE is explicitly production.
-    # settings.mode defaults to "production" even in development, so an unset
-    # MODE must not block the local/staging wipe.
-    env = (os.getenv("ENVIRONMENT") or "").upper()
-    explicit_mode = (os.getenv("MODE") or "").lower()
-    if env == "PRODUCTION" or explicit_mode == "production":
-        raise HTTPException(status_code=403, detail="Data reset is disabled in production")
-    deleted = {}
-    for table in _RESET_TABLES:
-        res = db.execute(text(f"DELETE FROM {table}"))
-        deleted[table] = res.rowcount if res.rowcount is not None else 0
-    db.commit()
-
-    # Also clear stored files on disk. Upload ids restart at 1 after the wipe,
-    # so leaving old incoming/{id} dirs would make the next upload re-ingest
-    # stale files. Remove everything under the storage root.
-    import shutil
-
-    from app.services.statement_ingest.storage import get_storage_root
-
-    root = get_storage_root()
-    try:
-        if os.path.isdir(root):
-            for entry in os.listdir(root):
-                path = os.path.join(root, entry)
-                shutil.rmtree(path, ignore_errors=True) if os.path.isdir(path) else os.remove(path)
-    except OSError as exc:
-        logger.warning(f"reset: could not fully clear storage root {root}: {exc}")
-
-    logger.warning(
-        f"admin {user.id} reset ALL client/statement data "
-        f"(environment={env or 'unset'}, mode={explicit_mode or 'unset'})"
-    )
-    return {"status": "reset", "deleted": deleted}
 
 
 @writers_admin_router.patch("/{writer_id}")

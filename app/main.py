@@ -72,22 +72,10 @@ _extra_origins = [
     if o.strip()
 ]
 
-origins = [
-    # RENDER TEST
-    "https://r.verax.app",
-    "https://www.r.verax.app",
-    # PRODUCTION
-    "https://verax.app",
-    "https://www.verax.app",
-    "https://production.verax.app",
-    "https://www.production.verax.app",
-    # STAGING
-    "https://staging.verax.app",
-    "https://www.staging.verax.app",
-    # DEVELOPMENT
-    "https://development.verax.app",
-    "https://www.development.verax.app",
-]
+# No hardcoded production origins: the portal's own frontend is the only
+# browser client, and it is named per deploy in EXTRA_CORS_ORIGINS (added
+# below). The old Verax product's domains are deliberately not allowed.
+origins = []
 
 
 app.include_router(api_router)
@@ -173,22 +161,6 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(
     TrustedHostMiddleware,
     allowed_hosts=[
-        "r.verax.app",
-        "www.r.verax.app",
-        "r-api.verax.app",
-        "www.r-api.verax.app",
-        "staging.verax.app",
-        "www.staging.verax.app",
-        "api-staging.verax.app",
-        "www.api-staging.verax.app",
-        "verax.app",
-        "www.verax.app",
-        "api.verax.app",
-        "www.api.verax.app",
-        "development.verax.app",
-        "www.development.verax.app",
-        "api-development.verax.app",
-        "www.api-development.verax.app",
         "localhost",
         "127.0.0.1",
         # The API's own hostname on the deploy target. TrustedHostMiddleware

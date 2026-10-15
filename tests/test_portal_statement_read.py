@@ -30,7 +30,10 @@ from app.routers.portal import me_router
 
 
 @pytest.fixture()
-def scenario(session, tmp_path):
+def scenario(session, tmp_path, monkeypatch):
+    # Statement files live under the storage root and rows store paths relative
+    # to it, as in production; anything resolving outside the root is refused.
+    monkeypatch.setenv("STATEMENTS_STORAGE_ROOT", str(tmp_path))
     pub = Publisher(name="Regalias Digitales")
     session.add(pub)
     session.flush()
@@ -49,7 +52,7 @@ def scenario(session, tmp_path):
     pdf.write_bytes(b"%PDF-1.4 fake pdf bytes")
     s = Statement(batch_id=b.id, account_id=acct.id, period_code="PUB26H1", version=1,
                   parse_status=ParseStatus.PARSED, payable=Decimal("1280.28"),
-                  pdf_path=str(pdf), line_count=4)
+                  pdf_path=pdf.name, line_count=4)
     session.add(s)
     session.flush()
     # line items across income types / countries / channels
@@ -157,9 +160,25 @@ def with_xlsx(session, scenario, tmp_path):
     stmt = session.get(Statement, dist.statement_id)
     xlsx = tmp_path / "redzed.xlsx"
     xlsx.write_bytes(b"PK\x03\x04 fake xlsx bytes")
-    stmt.xlsx_path = str(xlsx)
+    stmt.xlsx_path = xlsx.name
     session.commit()
     return scenario
+
+
+def test_download_refuses_a_path_outside_storage(session, scenario, tmp_path):
+    """A stored path that points outside the storage root is not served, even
+    when the file exists and the caller may see the statement."""
+    outside = tmp_path.parent / "outside-storage.pdf"
+    outside.write_bytes(b"%PDF-1.4 not a statement")
+    dist = session.get(Distribution, scenario["dist_id"])
+    stmt = session.get(Statement, dist.statement_id)
+    holder = {"user": scenario["rz_user"]}
+    client = _client(session, holder)
+    for stored in (str(outside), "../outside-storage.pdf"):
+        stmt.pdf_path = stored
+        session.commit()
+        r = client.get(f"/me/statements/{scenario['dist_id']}/pdf")
+        assert r.status_code == 404, stored
 
 
 def test_xlsx_download_scoped(session, with_xlsx):

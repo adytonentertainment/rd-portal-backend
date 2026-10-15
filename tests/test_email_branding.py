@@ -105,6 +105,7 @@ def test_reset_password_email_is_not_signed_verax(no_branding, monkeypatch):
     class _U:
         email = "writer@example.com"
         username = "writer"
+        hashed_password = "$2b$12$examplehashexamplehashexamplehashexamplehashexample"
 
     EMail.send_reset_password_email(m, _U())
 

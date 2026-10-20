@@ -256,6 +256,9 @@ def test_invite_accept_creates_login_for_a_brand_new_email(session, seed):
     )
     assert r.status_code == 200, r.text
     assert r.json()["access_token"]
+    # The browser session is set as an HttpOnly cookie, not left for page script.
+    set_cookie = r.headers["set-cookie"].lower()
+    assert set_cookie.startswith("rd_session=") and "httponly" in set_cookie
     assert session.query(User).filter(User.email == "newcomer@example.com").one()
 
 

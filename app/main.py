@@ -6,6 +6,8 @@ import uvicorn
 from app.database import create_tables
 from app.logger import get_logger, setup_logging
 from app.middleware import PerformanceMonitoringMiddleware, SecurityHeadersMiddleware
+from app.middleware.csrf import CookieCSRFMiddleware
+from app.routers.auth import SESSION_COOKIE
 from app.routers import api_router
 from app.services.statement_ingest.runner import start_ingest_worker, stop_ingest_worker
 from app.settings import get_settings
@@ -185,6 +187,10 @@ if (os.getenv("ENVIRONMENT") or "").upper() == "DEVELOPMENT":
     )
 
 origins.extend(_extra_origins)
+
+# Cookie-authenticated writes must carry X-Requested-With (see the module doc).
+# Added before CORS so CORS stays outermost and still answers preflights.
+app.add_middleware(CookieCSRFMiddleware, cookie_name=SESSION_COOKIE)
 
 # Add CORS middleware LAST so it runs FIRST (handles preflight before other middleware)
 app.add_middleware(

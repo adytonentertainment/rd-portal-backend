@@ -138,8 +138,13 @@ def test_one_login_holds_both_clients_and_can_switch(client, session, two_writer
     assert first.status_code == 200, first.text
     assert [w["name"] for w in first.json()["writers"]] == ["Amenazzy"]
 
-    # the second needs the SAME password: proof, not a new account
+    # Accepting signs the browser in (session cookie). From a browser that is
+    # NOT signed in, the second needs the SAME password: proof, not a new account.
+    signed_in_cookies = dict(client.cookies)
+    client.cookies.clear()
     assert client.post("/portal/accept-invite", json={"token": tok_b}).status_code == 401
+    # Being signed in as that email is also proof (the session cookie).
+    assert signed_in_cookies.get("rd_session")
     second = client.post("/portal/accept-invite", json={
         "token": tok_b, "password": "one-password"})
     assert second.status_code == 200, second.text

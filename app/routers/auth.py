@@ -1,6 +1,7 @@
 import os
 import time
 from datetime import datetime, timedelta
+from typing import Optional
 from urllib.parse import urljoin
 
 from app.database.session import get_session
@@ -37,9 +38,9 @@ from app.schemas.user import UpdateUserRequest
 from app.settings.settings import get_settings
 from app.utils.password_stamp import password_stamp
 from app.utils.password_validator import MIN_LENGTH, get_password_requirements
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordRequestForm
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -58,15 +59,16 @@ ALGORITHM = settings.secret_algorithm
 # expire. An hour is long enough to open the email and short enough that a
 # forwarded or logged link does not work forever.
 PASSWORD_RESET_MAX_AGE = 60 * 60
+SESSION_TTL = timedelta(days=7)
 
 
 def mint_session_token(user: User) -> str:
-    """Bearer token. `pwd` dies when hashed_password changes."""
+    """Session JWT. `pwd` dies when hashed_password changes."""
     payload = {
         "sub": user.username,
         "id": user.id,
         "email": user.email,
-        "exp": datetime.now() + timedelta(days=7),
+        "exp": datetime.now() + SESSION_TTL,
         "pwd": password_stamp(user.hashed_password),
     }
     return jwt.encode(payload, key=SECRET_KEY, algorithm=ALGORITHM)
@@ -75,6 +77,50 @@ def mint_session_token(user: User) -> str:
 def _reject_stale_token(user: User, payload: dict) -> None:
     if payload.get("pwd") != password_stamp(user.hashed_password):
         raise HTTPException(status_code=403, detail="Token is invalid or expired")
+
+
+# The browser session lives in an HttpOnly cookie, so no script on the portal
+# can read it. The portal and the API share a registrable domain
+# (royalties.regaliasdigitales.com / api.royalties.regaliasdigitales.com), which
+# makes this a first-party cookie: SameSite=Lax is sent on the portal's own
+# requests and withheld from other sites'. Data-changing requests that carry it
+# must also send X-Requested-With (see app/middleware/csrf.py).
+SESSION_COOKIE = "rd_session"
+
+
+def _cookie_secure() -> bool:
+    # Plain-http localhost in development cannot set a Secure cookie.
+    return (os.getenv("ENVIRONMENT") or "").upper() != "DEVELOPMENT"
+
+
+def set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=int(SESSION_TTL.total_seconds()),
+        httponly=True,
+        secure=_cookie_secure(),
+        samesite="lax",
+        path="/",
+    )
+
+
+def clear_session_cookie(response: Response) -> None:
+    response.delete_cookie(
+        SESSION_COOKIE, path="/", httponly=True, secure=_cookie_secure(), samesite="lax"
+    )
+
+
+def session_token_from(request: Request) -> Optional[str]:
+    """The caller's session token: the cookie, else a Bearer header. The header
+    remains for scripts and tests; browsers never receive a token to send in it."""
+    token = request.cookies.get(SESSION_COOKIE)
+    if token:
+        return token
+    header = request.headers.get("authorization") or ""
+    if header.lower().startswith("bearer "):
+        return header[7:].strip() or None
+    return None
 
 auth_router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -102,12 +148,10 @@ async def get_password_requirements_endpoint():
 
 
 bcrypt_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2_bearer = OAuth2PasswordBearer(tokenUrl="auth/token", auto_error=False)
 
 
-async def get_user(
-    token: str = Depends(oauth2_bearer), db: Session = Depends(get_session)
-):
+async def get_user(request: Request, db: Session = Depends(get_session)):
+    token = session_token_from(request)
     if token is None:
         raise HTTPException(status_code=401, detail="Authentication required")
     try:
@@ -332,8 +376,11 @@ async def get_user_avatar(user: User = Depends(get_user)):
 
 @auth_router.delete("/user", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_user(
-    token: str = Depends(oauth2_bearer), db: Session = Depends(get_session)
+    request: Request, response: Response, db: Session = Depends(get_session)
 ):
+    token = session_token_from(request)
+    if token is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
@@ -368,6 +415,7 @@ async def delete_user(
         # delete user (UserCatalog cascades via model config)
         db.delete(user)
         db.commit()
+        clear_session_cookie(response)
 
     except JWTError:
         raise HTTPException(status_code=403, detail="Token is invalid or expired")
@@ -414,6 +462,7 @@ async def confirm_user(token: str, db: Session = Depends(get_session)):
 @auth_router.post("/token", response_model=Token, status_code=status.HTTP_200_OK)
 async def login_user(
     request: Request,
+    response: Response,
     form_data=Depends(OAuth2PasswordRequestForm),
     db: Session = Depends(get_session),
 ):
@@ -470,7 +519,15 @@ async def login_user(
     account_lockout.record_successful_login(form_data.username)
 
     # user found, authenticate
-    return {"access_token": mint_session_token(user), "token_type": "bearer"}
+    token = mint_session_token(user)
+    set_session_cookie(response, token)
+    return {"access_token": token, "token_type": "bearer"}
+
+
+@auth_router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(response: Response):
+    """End the browser session. Needs no valid session: clearing is harmless."""
+    clear_session_cookie(response)
 
 
 @auth_router.post("/resend-verification", status_code=status.HTTP_200_OK)
@@ -610,15 +667,14 @@ def _decode_session_token(token: str, db: Session) -> dict:
 
 @auth_router.get("/verify-token")
 async def verify_token_header(request: Request, db: Session = Depends(get_session)):
-    """Validate the caller's session, taking the token from the Authorization
+    """Validate the caller's session, from the session cookie or a Bearer
     header.
 
     The token must NOT travel in the URL: request lines are written verbatim to
-    the access log, so the path-based variant below put live session tokens —
-    including an admin's — in plaintext on disk, where anyone with log access
-    could replay them until expiry. Headers are not logged.
+    the access log, so a path-based variant put live session tokens — including
+    an admin's — in plaintext on disk. Cookies and headers are not logged.
     """
-    header = request.headers.get("authorization") or ""
-    if not header.lower().startswith("bearer "):
+    token = session_token_from(request)
+    if not token:
         raise HTTPException(status_code=403, detail="Token is invalid or expired")
-    return _decode_session_token(header[7:].strip(), db)
+    return _decode_session_token(token, db)

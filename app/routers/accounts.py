@@ -15,7 +15,7 @@ Verax accounts don't need that machinery.
 import os
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr, field_validator
 from sqlalchemy.orm import Session
 from starlette import status
@@ -25,7 +25,7 @@ from app.settings.settings import get_settings
 from app.logger.logger import get_logger
 from app.middleware.rate_limit import check_rate_limit, signup_rate_limiter
 from app.models.models import User
-from app.routers.auth import bcrypt_context, get_user, mint_session_token
+from app.routers.auth import bcrypt_context, get_user, mint_session_token, set_session_cookie
 from app.routers.statements_admin import require_admin
 from app.utils.password_validator import validate_password
 from app.utils.roles import is_bootstrap_admin_email, is_effective_admin
@@ -88,6 +88,7 @@ def _user_out(user: User) -> dict:
 async def register(
     body: RegisterRequest,
     request: Request,
+    response: Response,
     db: Session = Depends(get_session),
 ):
     """Create a Verax admin or writer account."""
@@ -134,7 +135,9 @@ async def register(
         f"registered {body.role} account {user.id} ({email}); "
         f"admin_approved={admin_approved}"
     )
-    return {"access_token": _mint_token(user), "token_type": "bearer", **_user_out(user)}
+    token = _mint_token(user)
+    set_session_cookie(response, token)
+    return {"access_token": token, "token_type": "bearer", **_user_out(user)}
 
 
 @accounts_router.get("/me/account")

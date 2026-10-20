@@ -27,7 +27,7 @@ from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 
-from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from jose import jwt
 from pydantic import BaseModel, EmailStr
@@ -49,7 +49,15 @@ from app.models.statements import (
     WriterContact,
     WriterStatus,
 )
-from app.routers.auth import ALGORITHM, SECRET_KEY, bcrypt_context, get_user, mint_session_token
+from app.routers.auth import (
+    ALGORITHM,
+    SECRET_KEY,
+    bcrypt_context,
+    get_user,
+    mint_session_token,
+    session_token_from,
+    set_session_cookie,
+)
 from app.utils.password_stamp import password_stamp
 from app.routers.statements_admin import require_admin
 from app.services.portal import invites as invite_svc
@@ -1052,11 +1060,11 @@ def _authenticated_email(request: Request, db: Session) -> Optional[str]:
     raises: the accept-invite flow is public, and being signed in is only one of
     the ways to prove you own an already-registered email. A token issued before
     the password changed does not count."""
-    header = request.headers.get("authorization") or ""
-    if not header.lower().startswith("bearer "):
+    token = session_token_from(request)
+    if not token:
         return None
     try:
-        payload = jwt.decode(header[7:].strip(), SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
     except Exception:
         return None
     email = payload.get("email")
@@ -1071,6 +1079,7 @@ def _authenticated_email(request: Request, db: Session) -> Optional[str]:
 @portal_router.post("/accept-invite")
 async def accept_invite(
     request: Request,
+    response: Response,
     body: AcceptRequest = Body(...),
     db: Session = Depends(get_session),
 ):
@@ -1098,8 +1107,10 @@ async def accept_invite(
         raise HTTPException(status_code=400, detail=str(e))
     writer_ids = invite_svc.writer_ids_for_user(db, user)
     writers = db.query(Writer).filter(Writer.id.in_(writer_ids or [0])).all()
+    token = _mint_token(user)
+    set_session_cookie(response, token)
     return {
-        "access_token": _mint_token(user),
+        "access_token": token,
         "token_type": "bearer",
         "email": contact.email,
         "username": user.username,

@@ -266,9 +266,37 @@ class Distribution(Base):
     superseded_by = Column(Integer, ForeignKey("distribution.id"), nullable=True)
     # What the readiness gate looked like at publish time (audit).
     gate_snapshot = Column(JSON, nullable=True)
+    # When the writer's portal contacts were emailed that this statement is
+    # ready. Null = not (yet) notified. Set only by an admin's "Notify writers"
+    # for the current period, never by publishing (see statement_notify.py).
+    notified_at = Column(DateTime, nullable=True, index=True)
 
     statement = relationship("Statement")
     writer = relationship("Writer")
+
+
+class StatementNotification(Base):
+    """One "your new statements are ready" email to one contact.
+
+    A row per recipient per Notify run, so the admin can see what was sent,
+    what failed and why, and retry failures. The email carries no amounts.
+    """
+
+    __tablename__ = "statement_notification"
+
+    id = Column(Integer, primary_key=True)
+    period_code = Column(String, nullable=False, index=True)
+    contact_id = Column(Integer, ForeignKey("contact.id"), nullable=True, index=True)
+    email = Column(String, nullable=False)
+    language = Column(String(2), nullable=False, default="en")
+    writer_ids = Column(JSON, nullable=False)
+    distribution_ids = Column(JSON, nullable=False)
+    # pending | sent | failed | suppressed (EMAIL_ALLOWLIST) | not_sent (batch stopped)
+    status = Column(String(16), nullable=False, default="pending", index=True)
+    error = Column(String(500), nullable=True)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    sent_at = Column(DateTime, nullable=True)
+    created_by = Column(Integer, ForeignKey("User.id"), nullable=True)
 
 
 class PortalInvite(Base):

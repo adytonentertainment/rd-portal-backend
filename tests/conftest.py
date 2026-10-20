@@ -52,6 +52,20 @@ def no_real_email(session, monkeypatch):
     monkeypatch.setattr(invite_delivery, "EMail", _NullMailer)
     monkeypatch.setattr(session, "close", lambda: None)
 
+    # Same for "new statements ready" notifications, which also send from a
+    # background task on their own session.
+    from app.services.portal import statement_notify
+
+    class _NullNotifyMailer:
+        def _blocked_by_allowlist(self, email):
+            return False
+
+        def send_statements_ready_email(self, **kwargs):
+            return None
+
+    monkeypatch.setattr(statement_notify, "SessionLocal", lambda: session)
+    monkeypatch.setattr(statement_notify, "EMail", _NullNotifyMailer)
+
 
 @pytest.fixture()
 def grant_access(session):

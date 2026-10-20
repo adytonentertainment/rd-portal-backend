@@ -6,7 +6,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -1203,6 +1203,24 @@ async def list_distribution_periods(
         if sid in distributed_ids:
             a["distributed"] += 1
 
+    # Notification state: which periods can be notified (newest only) and how
+    # many writers with published statements have been told.
+    from app.services.portal.statement_notify import notifiable_periods
+
+    notifiable = notifiable_periods(db)
+    notified_w = defaultdict(set)
+    pending_w = defaultdict(set)
+    for period, writer_id, notified_at in (
+        db.query(Distribution.period_code, Distribution.writer_id, Distribution.notified_at)
+        .join(Writer, Distribution.writer_id == Writer.id)
+        .filter(
+            Distribution.portal_visible.is_(True),
+            Writer.is_house_account.is_(False),
+            Writer.publisher_owned.is_(False),
+        )
+    ):
+        (notified_w if notified_at is not None else pending_w)[period].add(writer_id)
+
     out = []
     for period, a in agg.items():
         if a["distributed"] == 0:
@@ -1221,7 +1239,86 @@ async def list_distribution_periods(
                 "net_total": str(a["net"]),
                 "status": status,
                 "distributed_at": pub_at.isoformat() if pub_at else None,
+                "notifiable": period in notifiable,
+                "writers_notified": len(notified_w[period]),
+                "writers_not_notified": len(pending_w[period] - notified_w[period]),
             }
         )
     out.sort(key=lambda r: r["period_code"], reverse=True)
     return out
+
+
+# --- "Notify writers": tell portal contacts that new statements are ready ------
+# Publishing never emails anyone. An admin notifies the NEWEST period when ready;
+# older (backfilled) periods are refused. See app/services/portal/statement_notify.py.
+
+
+def _notify_error(e: Exception) -> HTTPException:
+    return HTTPException(status_code=409, detail=str(e))
+
+
+@distributions_admin_router.get("/periods/{period_code}/notify")
+async def period_notify_summary(
+    period_code: str,
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_session),
+):
+    """Who would be emailed now, and how past runs for this period went."""
+    from app.services.portal import statement_notify
+
+    return {"label": _period_label(period_code), **statement_notify.summary(db, period_code)}
+
+
+@distributions_admin_router.post("/periods/{period_code}/notify")
+async def notify_period(
+    period_code: str,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_session),
+):
+    """Email each portal contact once that this period's new statements are
+    ready. Sending runs in the background; poll the GET for progress."""
+    from app.services.portal import statement_notify
+
+    try:
+        ids = statement_notify.start(db, period_code, admin_id=user.id)
+    except statement_notify.NotifyRefused as e:
+        raise _notify_error(e)
+    background_tasks.add_task(statement_notify.send, ids)
+    return {"queued": len(ids), **statement_notify.summary(db, period_code)}
+
+
+@distributions_admin_router.post("/periods/{period_code}/notify/retry")
+async def retry_period_notify(
+    period_code: str,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_session),
+):
+    """Re-send this period's failed, unsent or allowlist-suppressed emails."""
+    from app.services.portal import statement_notify
+
+    try:
+        ids = statement_notify.retry(db, period_code)
+    except statement_notify.NotifyRefused as e:
+        raise _notify_error(e)
+    if ids:
+        background_tasks.add_task(statement_notify.send, ids)
+    return {"queued": len(ids), **statement_notify.summary(db, period_code)}
+
+
+@distributions_admin_router.post("/periods/{period_code}/notify/preview")
+async def preview_period_notify(
+    period_code: str,
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_session),
+):
+    """Send the English and Spanish versions to the signed-in admin only."""
+    from app.services.portal import statement_notify
+
+    try:
+        return statement_notify.send_preview(db, period_code, to_email=user.email)
+    except statement_notify.NotifyRefused as e:
+        raise _notify_error(e)
+    except Exception as e:  # mail provider error: say so instead of a bare 500
+        raise HTTPException(status_code=502, detail=f"Preview email could not be sent: {e}")

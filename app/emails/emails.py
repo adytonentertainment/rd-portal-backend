@@ -428,6 +428,99 @@ class EMail:
             # address them by — the mailbox itself is the name we know.
             self.send_email(recipient_email, recipient_email, title, html)
 
+    def period_words(self, period_code: str, language: str = "en") -> str:
+        """`PUB26H1` -> "January–June 2026" / "enero–junio de 2026"."""
+        from app.services.distribution.periods import parse_period
+
+        lang = "es" if (language or "").lower().startswith("es") else "en"
+        parsed = parse_period(period_code)
+        if parsed is None:
+            return period_code
+        year, start, end = parsed
+        first, last = self._MONTHS[lang][start - 1], self._MONTHS[lang][end - 1]
+        return f"{first}–{last} {year}" if lang == "en" else f"{first}–{last} de {year}"
+
+    @staticmethod
+    def _join_names(names, lang: str) -> str:
+        names = [n for n in names if n]
+        if len(names) <= 1:
+            return names[0] if names else ""
+        conj = " and " if lang == "en" else " y "
+        return ", ".join(names[:-1]) + conj + names[-1]
+
+    def send_statements_ready_email(
+        self,
+        recipient_email: str,
+        writer_names,
+        period_code: str,
+        portal_url: str,
+        sender: str = None,
+        language: str = "en",
+    ):
+        """Tell a portal contact that new statements are ready.
+
+        Sent when an admin notifies a reporting period. Deliberately carries no
+        amounts: the figures stay behind the portal login, and a mail about
+        someone's royalties that quotes them is both a leak and a phishing
+        template. Same plain, publisher-branded shape as the invite.
+        """
+        lang = (language or "en").lower()[:2]
+        if lang not in ("en", "es"):
+            lang = "en"
+        sender = sender or self.from_name
+        names = self._join_names(writer_names, lang)
+        period = self.period_words(period_code, lang)
+
+        if lang == "es":
+            title = f"Nuevos estados de cuenta disponibles: {names} — {period}"
+            message = (
+                f"Ya están disponibles en su portal los nuevos estados de cuenta "
+                f"de regalías de <b>{names}</b>, correspondientes a {period}."
+                f"<br><br>"
+                f"Inicie sesión para ver cada estado de cuenta, lo que generó cada "
+                f"canción por fuente y por territorio, y para descargar los "
+                f"documentos originales.<br><br>"
+                f"Por seguridad, este correo no incluye montos: solo se muestran "
+                f"dentro de su portal.<br><br>"
+                f"Si algo no le parece correcto, consulte con {sender}."
+            )
+            button = "Ver estados de cuenta"
+        else:
+            title = f"New royalty statements ready: {names} — {period}"
+            message = (
+                f"New royalty statements for <b>{names}</b>, covering {period}, "
+                f"are now available in your portal.<br><br>"
+                f"Sign in to read each statement, see what each song earned by "
+                f"source and territory, and download the original documents."
+                f"<br><br>"
+                f"For your security, this email does not include amounts: they "
+                f"are only shown inside your portal.<br><br>"
+                f"If something here looks wrong, check with {sender}."
+            )
+            button = "View statements"
+
+        with open(self.template_path) as f:
+            template = self.jinja.from_string(f.read())
+            html = template.render(
+                title=title,
+                message=message,
+                button=button,
+                button_url=portal_url,
+                base_url=settings.base_url_frontend,
+                brand_name=sender.upper(),
+                social_url="",
+                signoff="Kind regards," if lang == "en" else "Atentamente,",
+                signoff_name=(
+                    f"the {sender} team" if lang == "en" else f"el equipo de {sender}"
+                ),
+                footer_text=(
+                    f"Copyright &copy; {datetime.now().year} {sender}. All rights reserved."
+                    if lang == "en"
+                    else f"Copyright &copy; {datetime.now().year} {sender}. Todos los derechos reservados."
+                ),
+            )
+            self.send_email(recipient_email, recipient_email, title, html)
+
     def send_claim_email(self, user: User, artist, title, message):
         message = f"""The user {user.username} has sent us a claim request.<br><br>
         Artist: {artist}<br><br>

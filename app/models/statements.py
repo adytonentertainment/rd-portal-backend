@@ -292,6 +292,7 @@ class StatementNotification(Base):
     writer_ids = Column(JSON, nullable=False)
     distribution_ids = Column(JSON, nullable=False)
     # pending | sent | failed | suppressed (EMAIL_ALLOWLIST) | not_sent (batch stopped)
+    # | replaced (a duplicate for the same person; never sent)
     status = Column(String(16), nullable=False, default="pending", index=True)
     error = Column(String(500), nullable=True)
     created_at = Column(DateTime, default=datetime.now, nullable=False)

@@ -6,6 +6,7 @@ from email.utils import formatdate
 from functools import lru_cache
 from smtplib import SMTP
 from urllib.parse import urljoin
+from html import escape as _esc
 
 import jinja2
 from app.logger.logger import get_logger
@@ -334,6 +335,8 @@ class EMail:
             lang = "en"
 
         sender = invited_by or self.from_name
+        # Escaped for the HTML body: names and addresses come from imported data.
+        writer_html, sender_html, email_html = _esc(writer_name), _esc(sender), _esc(recipient_email)
 
         expiry = ""
         if expires_at is not None:
@@ -352,8 +355,8 @@ class EMail:
         if lang == "es":
             title = f"Su portal de regalías para {writer_name} — {sender}"
             message = (
-                f"{sender} le invita a acceder al portal de regalías de "
-                f"<b>{writer_name}</b>, donde a partir de ahora estarán sus "
+                f"{sender_html} le invita a acceder al portal de regalías de "
+                f"<b>{writer_html}</b>, donde a partir de ahora estarán sus "
                 f"estados de cuenta, disponibles cuando los necesite.<br><br>"
                 f"Allí puede:<br>"
                 f"• consultar cada estado de cuenta por período, con los "
@@ -363,19 +366,19 @@ class EMail:
                 f"• descargar los documentos originales cuando quiera<br><br>"
                 f"Use el botón de abajo para abrir su portal y elegir una "
                 f"contraseña. Su acceso queda vinculado a esta dirección, "
-                f"{recipient_email}.{expiry}<br><br>"
+                f"{email_html}.{expiry}<br><br>"
                 f"La forma en que se le paga no cambia: el portal es donde vive "
                 f"la documentación que respalda esos pagos.<br><br>"
                 f"Si no esperaba este mensaje, puede ignorarlo. Si lo esperaba "
-                f"pero algo no le parece correcto, consulte con {sender} antes "
+                f"pero algo no le parece correcto, consulte con {sender_html} antes "
                 f"de iniciar sesión."
             )
             button = "Abrir su portal"
         else:
             title = f"Your royalty portal for {writer_name} — {sender}"
             message = (
-                f"{sender} has invited you to access the royalty portal for "
-                f"<b>{writer_name}</b> — where your royalty statements now "
+                f"{sender_html} has invited you to access the royalty portal for "
+                f"<b>{writer_html}</b> — where your royalty statements now "
                 f"live, available whenever you want to look at them.<br><br>"
                 f"Inside you can:<br>"
                 f"• read each statement by period, with the totals behind "
@@ -385,12 +388,12 @@ class EMail:
                 f"<br><br>"
                 f"Use the button below to open your portal and choose a "
                 f"password. Your access is tied to this address, "
-                f"{recipient_email}.{expiry}<br><br>"
+                f"{email_html}.{expiry}<br><br>"
                 f"How you get paid does not change — the portal is where the "
                 f"paperwork behind those payments lives.<br><br>"
                 f"If you were not expecting this email, you can ignore it. If "
                 f"you were expecting it but something here looks wrong, check "
-                f"with {sender} before signing in."
+                f"with {sender_html} before signing in."
             )
             button = "Open your portal"
 
@@ -405,23 +408,23 @@ class EMail:
                 # No _brand() here: the invite derives its branding from the
                 # publisher record for this writer, which is more specific than
                 # the deployment-wide default.
-                title=title,
+                title=_esc(title),
                 message=message,
                 button=button,
                 button_url=accept_url,
                 base_url=settings.base_url_frontend,
-                brand_name=sender.upper(),
+                brand_name=_esc(sender.upper()),
                 # No vendor social link on a publisher's mail. Other templates
                 # that omit this keep the existing default.
                 social_url="",
                 signoff="Kind regards," if lang == "en" else "Atentamente,",
                 signoff_name=(
-                    f"the {sender} team" if lang == "en" else f"el equipo de {sender}"
+                    f"the {sender_html} team" if lang == "en" else f"el equipo de {sender_html}"
                 ),
                 footer_text=(
-                    f"Copyright &copy; {year} {sender}. All rights reserved."
+                    f"Copyright &copy; {year} {sender_html}. All rights reserved."
                     if lang == "en"
-                    else f"Copyright &copy; {year} {sender}. Todos los derechos reservados."
+                    else f"Copyright &copy; {year} {sender_html}. Todos los derechos reservados."
                 ),
             )
             # The recipient has no account yet, so there is no username to
@@ -470,53 +473,56 @@ class EMail:
         sender = sender or self.from_name
         names = self._join_names(writer_names, lang)
         period = self.period_words(period_code, lang)
+        # Names come from imported client data: escape them in the HTML so a
+        # name can never inject markup or links into a mail writers trust.
+        names_html, sender_html = _esc(names), _esc(sender)
 
         if lang == "es":
             title = f"Nuevos estados de cuenta disponibles: {names} — {period}"
             message = (
                 f"Ya están disponibles en su portal los nuevos estados de cuenta "
-                f"de regalías de <b>{names}</b>, correspondientes a {period}."
+                f"de regalías de <b>{names_html}</b>, correspondientes a {period}."
                 f"<br><br>"
                 f"Inicie sesión para ver cada estado de cuenta, lo que generó cada "
                 f"canción por fuente y por territorio, y para descargar los "
                 f"documentos originales.<br><br>"
                 f"Por seguridad, este correo no incluye montos: solo se muestran "
                 f"dentro de su portal.<br><br>"
-                f"Si algo no le parece correcto, consulte con {sender}."
+                f"Si algo no le parece correcto, consulte con {sender_html}."
             )
             button = "Ver estados de cuenta"
         else:
             title = f"New royalty statements ready: {names} — {period}"
             message = (
-                f"New royalty statements for <b>{names}</b>, covering {period}, "
+                f"New royalty statements for <b>{names_html}</b>, covering {period}, "
                 f"are now available in your portal.<br><br>"
                 f"Sign in to read each statement, see what each song earned by "
                 f"source and territory, and download the original documents."
                 f"<br><br>"
                 f"For your security, this email does not include amounts: they "
                 f"are only shown inside your portal.<br><br>"
-                f"If something here looks wrong, check with {sender}."
+                f"If something here looks wrong, check with {sender_html}."
             )
             button = "View statements"
 
         with open(self.template_path) as f:
             template = self.jinja.from_string(f.read())
             html = template.render(
-                title=title,
+                title=_esc(title),
                 message=message,
                 button=button,
                 button_url=portal_url,
                 base_url=settings.base_url_frontend,
-                brand_name=sender.upper(),
+                brand_name=_esc(sender.upper()),
                 social_url="",
                 signoff="Kind regards," if lang == "en" else "Atentamente,",
                 signoff_name=(
-                    f"the {sender} team" if lang == "en" else f"el equipo de {sender}"
+                    f"the {sender_html} team" if lang == "en" else f"el equipo de {sender_html}"
                 ),
                 footer_text=(
-                    f"Copyright &copy; {datetime.now().year} {sender}. All rights reserved."
+                    f"Copyright &copy; {datetime.now().year} {sender_html}. All rights reserved."
                     if lang == "en"
-                    else f"Copyright &copy; {datetime.now().year} {sender}. Todos los derechos reservados."
+                    else f"Copyright &copy; {datetime.now().year} {sender_html}. Todos los derechos reservados."
                 ),
             )
             self.send_email(recipient_email, recipient_email, title, html)

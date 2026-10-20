@@ -488,7 +488,7 @@ class EMail:
                 f"documentos originales.<br><br>"
                 f"Por seguridad, este correo no incluye montos: solo se muestran "
                 f"dentro de su portal.<br><br>"
-                f"Si algo no le parece correcto, consulte con {sender_html}."
+                f"Si algo no le parece correcto, responda a este correo."
             )
             button = "Ver estados de cuenta"
         else:
@@ -501,7 +501,7 @@ class EMail:
                 f"<br><br>"
                 f"For your security, this email does not include amounts: they "
                 f"are only shown inside your portal.<br><br>"
-                f"If something here looks wrong, check with {sender_html}."
+                f"If something here looks wrong, reply to this email."
             )
             button = "View statements"
 

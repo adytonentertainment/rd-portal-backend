@@ -109,15 +109,23 @@ def test_a_password_change_ends_the_cookie_session(client, session):
     assert client.get("/auth/me/account").status_code == 403
 
 
+def test_login_response_body_carries_no_token(client):
+    body = _login(client).json()
+    assert "access_token" not in body
+    assert body == {"status": "signed_in"}
+
+
 def test_bearer_header_still_works_for_scripts(client):
-    token = _login(client).json()["access_token"]
+    _login(client)
+    token = client.cookies.get(SESSION_COOKIE)
     client.cookies.clear()
     r = client.get("/auth/me/account", headers={"Authorization": f"Bearer {token}"})
     assert r.status_code == 200
 
 
 def test_bearer_writes_do_not_need_the_csrf_header(client):
-    token = _login(client).json()["access_token"]
+    _login(client)
+    token = client.cookies.get(SESSION_COOKIE)
     client.cookies.clear()
     r = client.post(
         "/auth/change-password",

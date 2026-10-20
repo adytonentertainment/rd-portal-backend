@@ -56,7 +56,8 @@ def test_register_writer(client, session):
     assert body["role"] == "writer"
     assert body["is_admin"] is False
     assert body["pending_admin_approval"] is False
-    assert body["access_token"]
+    assert "access_token" not in body  # session is the HttpOnly cookie only
+    assert "rd_session=" in r.headers["set-cookie"]
     u = session.query(User).filter(User.email == "writer1@x.com").one()
     assert u.role == "writer" and u.admin_approved is False
 

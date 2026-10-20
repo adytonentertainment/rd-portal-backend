@@ -1107,11 +1107,9 @@ async def accept_invite(
         raise HTTPException(status_code=400, detail=str(e))
     writer_ids = invite_svc.writer_ids_for_user(db, user)
     writers = db.query(Writer).filter(Writer.id.in_(writer_ids or [0])).all()
-    token = _mint_token(user)
-    set_session_cookie(response, token)
+    # Session in the HttpOnly cookie only; the body carries no token.
+    set_session_cookie(response, _mint_token(user))
     return {
-        "access_token": token,
-        "token_type": "bearer",
         "email": contact.email,
         "username": user.username,
         "writers": [_writer_card(db, w, contact) for w in writers],

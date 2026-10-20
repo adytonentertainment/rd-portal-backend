@@ -135,9 +135,9 @@ async def register(
         f"registered {body.role} account {user.id} ({email}); "
         f"admin_approved={admin_approved}"
     )
-    token = _mint_token(user)
-    set_session_cookie(response, token)
-    return {"access_token": token, "token_type": "bearer", **_user_out(user)}
+    # Session in the HttpOnly cookie only; the body describes the account.
+    set_session_cookie(response, _mint_token(user))
+    return _user_out(user)
 
 
 @accounts_router.get("/me/account")

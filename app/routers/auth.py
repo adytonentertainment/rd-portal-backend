@@ -32,7 +32,6 @@ from app.schemas.auth import (
     NewPassword,
     ResetPassword,
     ResetPasswordEmail,
-    Token,
 )
 from app.schemas.user import UpdateUserRequest
 from app.settings.settings import get_settings
@@ -458,8 +457,8 @@ async def confirm_user(token: str, db: Session = Depends(get_session)):
     return RedirectResponse(url=urljoin(settings.base_url_frontend, "/email-confirmed"))
 
 
-@auth_router.post("/login", response_model=Token, status_code=status.HTTP_200_OK)
-@auth_router.post("/token", response_model=Token, status_code=status.HTTP_200_OK)
+@auth_router.post("/login", status_code=status.HTTP_200_OK)
+@auth_router.post("/token", status_code=status.HTTP_200_OK)
 async def login_user(
     request: Request,
     response: Response,
@@ -519,9 +518,10 @@ async def login_user(
     account_lockout.record_successful_login(form_data.username)
 
     # user found, authenticate
-    token = mint_session_token(user)
-    set_session_cookie(response, token)
-    return {"access_token": token, "token_type": "bearer"}
+    # The session goes only into the HttpOnly cookie; the body carries no token,
+    # so no script on the page ever sees one.
+    set_session_cookie(response, mint_session_token(user))
+    return {"status": "signed_in"}
 
 
 @auth_router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)

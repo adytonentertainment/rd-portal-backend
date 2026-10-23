@@ -1,0 +1,28 @@
+name: Tests
+
+# Every push and pull request: the full test suite, on the Python production
+# runs (Render PYTHON_VERSION). A red run means don't deploy.
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ENVIRONMENT: DEVELOPMENT
+      # Throwaway values: the suite signs its own test tokens.
+      SECRET_KEY: ci-only-not-a-secret
+      SECRET_ALGORITHM: HS256
+      # Read at import; each test builds its own database.
+      SQLALCHEMY_DATABASE_URL: sqlite:///./ci.db
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11.9'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Tests
+        run: python -m pytest -q

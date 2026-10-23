@@ -12,11 +12,12 @@ in `portal.py`; the one admin-only gap this file fills is a thin contact-unlink
 and an admin invite-revoke (portal.py's revoke is contact-self-service).
 """
 
+import re
 from datetime import datetime
 from decimal import Decimal
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
@@ -47,6 +48,9 @@ from app.models.statements import (
 from app.routers.portal import earnings_for_writers, transactions_for_writers
 from app.routers.statements_admin import require_admin
 from app.services.client_import.matcher import normalize as normalize_name
+from app.services import roster_corrections, roster_export
+from app.services.integrity import audit as integrity_audit
+from app.services.integrity import catalog_for_code, client_rows_from_last_import, is_commission_code
 from app.services.portal import invites as invite_svc
 from app.services.writers.suggest import suggest_clients_for
 
@@ -930,6 +934,62 @@ async def distribute_all(
     return {"sent_batches": len(sent), "skipped_batches": len(skipped), "sent": sent, "skipped": skipped}
 
 
+@writers_admin_router.get("/export/roster")
+async def export_roster(
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_session),
+):
+    """Every client and commission partner as a spreadsheet RD can review and
+    correct: codes split by kind, contacts, who signs in, and the integrity
+    problems on each entry (checked against the last applied client list)."""
+    data = roster_export.build(db, client_rows=client_rows_from_last_import(db))
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{roster_export.filename()}"'},
+    )
+
+
+_CORRECTIONS_MAX_BYTES = 10 * 1024 * 1024
+
+
+async def _read_sheet(file: UploadFile) -> bytes:
+    data = await file.read(_CORRECTIONS_MAX_BYTES + 1)
+    if len(data) > _CORRECTIONS_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="That file is over 10 MB; upload the roster export.")
+    return data
+
+
+@writers_admin_router.post("/corrections/preview")
+async def preview_corrections(
+    file: UploadFile = File(...),
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_session),
+):
+    """What uploading this corrected roster would change, and anything that
+    blocks it. Changes nothing."""
+    plan = roster_corrections.plan(db, await _read_sheet(file))
+    return plan.summary()
+
+
+@writers_admin_router.post("/corrections/apply")
+async def apply_corrections(
+    file: UploadFile = File(...),
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_session),
+):
+    """Apply a corrected roster in one transaction — all of it, or (when the
+    preview shows a problem) none of it."""
+    try:
+        result = roster_corrections.apply(db, await _read_sheet(file), admin_id=user.id)
+    except roster_corrections.CorrectionsRefused as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=f"Nothing was changed: {exc}")
+    remaining = [f for f in integrity_audit(db) if f.severity == "error"]
+    logger.info(f"admin {user.id} applied roster corrections: {result['counts']}")
+    return {**result, "remaining_errors": len(remaining)}
+
+
 @writers_admin_router.get("/{writer_id}")
 async def get_writer(
     writer_id: int,
@@ -947,6 +1007,12 @@ async def get_writer(
         db.query(BeneficiaryAccount)
         .filter(BeneficiaryAccount.writer_id == writer_id)
         .order_by(BeneficiaryAccount.account_code)
+        .all()
+    )
+    account_statements = dict(
+        db.query(Statement.account_id, func.count(Statement.id))
+        .filter(Statement.account_id.in_([a.id for a in accounts] or [-1]))
+        .group_by(Statement.account_id)
         .all()
     )
     # Statement history — per period + royalty type, with pairing (PDF+XLSX) and
@@ -1023,6 +1089,8 @@ async def get_writer(
                 "account_code": a.account_code,
                 "catalog": a.catalog.value if a.catalog else None,
                 "status": a.status.value if a.status else None,
+                # Removable (a typo) only while nothing has been filed under it.
+                "statement_count": account_statements.get(a.id, 0),
             }
             for a in accounts
         ],
@@ -1237,6 +1305,98 @@ async def assign_unmatched_to_client(
 
 class MoveAccountRequest(BaseModel):
     target_writer_id: int
+
+
+class AddAccountRequest(BaseModel):
+    account_code: str
+    # Optional: inferred from the code (JN…/CSJ… mechanical, C…/CS… YouTube).
+    catalog: Optional[str] = None
+
+
+_CODE_RE = re.compile(r"^[A-Z0-9]{3,12}$")
+
+
+@writers_admin_router.post("/{writer_id}/accounts", status_code=201)
+async def add_account(
+    writer_id: int,
+    body: AddAccountRequest,
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_session),
+):
+    """Register a beneficiary code on a client before its statements arrive.
+
+    Ingest files a statement under the client already holding its code, so a
+    new client set up with their codes receives their first statements
+    directly, instead of landing on an unmatched placeholder to be fixed later.
+
+    Refused when it would file statements wrongly:
+      * a code already on another client (that is a Move, done from their page),
+      * a commission code (CS…) on a client, or a writer code on a commission
+        partner — the mix-up that put commission statements on writer accounts.
+    """
+    writer = _get_writer_or_404(db, writer_id)
+    code = (body.account_code or "").strip().upper()
+    if not _CODE_RE.match(code):
+        raise HTTPException(status_code=422, detail="A beneficiary code is 3–12 letters and digits, e.g. C00122 or CSJ042.")
+    existing = db.query(BeneficiaryAccount).filter(BeneficiaryAccount.account_code == code).first()
+    if existing is not None:
+        if existing.writer_id == writer.id:
+            raise HTTPException(status_code=409, detail=f"{code} is already on this client.")
+        owner = db.get(Writer, existing.writer_id)
+        raise HTTPException(
+            status_code=409,
+            detail=f"{code} is already on {owner.canonical_name if owner else 'another client'}. "
+            f"To change who it belongs to, open that client and use Move.",
+        )
+    if writer.kind == WriterKind.CLIENT and is_commission_code(code):
+        raise HTTPException(
+            status_code=422,
+            detail=f"{code} is a commission code. Commission statements belong on a commission-partner entry, "
+            f"not on the client's own account.",
+        )
+    if writer.kind == WriterKind.COMMISSION_PARTNER and not is_commission_code(code):
+        raise HTTPException(
+            status_code=422,
+            detail=f"{code} is a writer code, and this is a commission partner. Add it to the client entry instead.",
+        )
+    if body.catalog:
+        try:
+            catalog = Catalog(body.catalog.upper())
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Catalog is MECH, YT or PERF.")
+    else:
+        catalog = catalog_for_code(code)
+        if catalog is None:
+            raise HTTPException(status_code=422, detail="Say which catalog this code is for: MECH, YT or PERF.")
+    account = BeneficiaryAccount(writer_id=writer.id, account_code=code, catalog=catalog, cadence=writer.cadence)
+    db.add(account)
+    db.commit()
+    logger.info(f"admin {user.id} added account {code} ({catalog.value}) to writer {writer.id} '{writer.canonical_name}'")
+    return {"id": account.id, "account_code": code, "catalog": catalog.value}
+
+
+@writers_admin_router.delete("/{writer_id}/accounts/{account_id}")
+async def remove_account(
+    writer_id: int,
+    account_id: int,
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_session),
+):
+    """Take back a code added by mistake. Only while no statement has arrived
+    under it: once one has, the code is history, and the fix is a Move."""
+    account = db.get(BeneficiaryAccount, account_id)
+    if account is None or account.writer_id != writer_id:
+        raise HTTPException(status_code=404, detail="Account not found on this client")
+    if db.query(Statement.id).filter(Statement.account_id == account.id).first() is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{account.account_code} already has statements. Use Move to give it to the right client.",
+        )
+    code = account.account_code
+    db.delete(account)
+    db.commit()
+    logger.info(f"admin {user.id} removed unused account {code} from writer {writer_id}")
+    return {"removed": code}
 
 
 @writers_admin_router.post("/{writer_id}/accounts/{account_id}/move")

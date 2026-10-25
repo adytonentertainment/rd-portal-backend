@@ -70,6 +70,8 @@ def test_full_share_lifecycle(session, admin_user, seed, monkeypatch):
     # 2) Public preview shows it needs a password (no login yet).
     pv = client.get(f"/portal/invites/{token}").json()
     assert pv["writer_name"] == "RedZed" and pv["needs_password"] is True
+    # The page opens in the language the email used (none set here: English).
+    assert pv["language"] == "en"
 
     # 3) Accept -> creates login + link, returns a session + the writer.
     a = client.post("/portal/accept-invite",
@@ -337,3 +339,22 @@ def test_case_duplicates_resolve_to_the_same_account_every_time(session):
 
     picks = {user_by_email(session, "dup@example.com").username for _ in range(5)}
     assert picks == {"first"}
+
+
+def test_invite_page_opens_in_the_readers_language(session, admin_user, seed, monkeypatch):
+    """Recipient's preference first, then the writer's — the same rule as the email."""
+    from app.models.statements import Contact, Writer
+
+    monkeypatch.setenv("ADMIN_EMAILS", ADMIN_EMAIL)
+    client = _app(session, {"user": admin_user})
+    wid = seed["writer_id"]
+    session.get(Writer, wid).preferred_language = "es"
+    session.commit()
+    token = client.post(f"/admin/writers/{wid}/invites", json={"email": "es@x.com", "role": "manager"}).json()["token"]
+    assert client.get(f"/portal/invites/{token}").json()["language"] == "es"
+
+    session.add(Contact(email="manager-en@x.com", preferred_language="en"))
+    session.commit()
+    token = client.post(f"/admin/writers/{wid}/invites",
+                        json={"email": "manager-en@x.com", "role": "manager"}).json()["token"]
+    assert client.get(f"/portal/invites/{token}").json()["language"] == "en"

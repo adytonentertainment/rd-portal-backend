@@ -22,6 +22,8 @@ import time
 from datetime import datetime
 from urllib.parse import urljoin
 
+from sqlalchemy.orm import Session
+
 from app.database.database import SessionLocal
 from app.emails.emails import EMail
 from app.logger.logger import get_logger
@@ -38,6 +40,19 @@ SEND_PACING_SECONDS = 0.5
 # address being bad. Bad credentials fail every message identically.
 MAX_CONSECUTIVE_FAILURES = 5
 
+
+
+def invite_language(db: Session, invite, writer) -> str:
+    """The language an invite speaks: the recipient's own preference wins over
+    the writer's, since one contact (a manager, an attorney) can represent
+    several writers and it is the reader who has to understand it. The email
+    and the page the link opens use the same answer."""
+    contact = db.query(Contact).filter(Contact.email == invite.email).first()
+    return (
+        (contact.preferred_language if contact else None)
+        or (writer.preferred_language if writer else None)
+        or "en"
+    )
 
 def invite_url(raw_token: str) -> str:
     """The link the recipient clicks. Points at the FRONTEND accept page
@@ -62,12 +77,7 @@ def _deliver(db, invite: PortalInvite, raw_token: str) -> bool:
     # The recipient's own preference wins over the writer's: one contact
     # (a manager, an attorney) can represent several writers, and it is the
     # reader who has to understand the mail, not the catalog.
-    contact = db.query(Contact).filter(Contact.email == invite.email).first()
-    language = (
-        (contact.preferred_language if contact else None)
-        or (writer.preferred_language if writer else None)
-        or "en"
-    )
+    language = invite_language(db, invite, writer)
 
     try:
         EMail().send_portal_invite_email(

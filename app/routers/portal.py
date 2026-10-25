@@ -63,6 +63,7 @@ from app.routers.statements_admin import require_admin
 from app.services.portal import invites as invite_svc
 from app.services.statement_ingest.storage import resolve_stored_path
 from app.services.portal.invite_delivery import (
+    invite_language,
     invite_url,
     send_invite_email,
     send_invite_emails,
@@ -1052,6 +1053,8 @@ async def preview_invite(token: str, db: Session = Depends(get_session)):
         # An OAuth-only account has no password to type, so the only proof it
         # can offer is being signed in already.
         "requires_sign_in": bool(has_login and not existing.hashed_password),
+        # The page opens in the language the invite email was written in.
+        "language": invite_language(db, inv, writer),
     }
 
 

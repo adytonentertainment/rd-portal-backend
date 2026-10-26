@@ -108,6 +108,18 @@ def test_the_filing_name_is_remembered_as_an_alias(client, session, world):
     assert "Rata Blanca (YouTube Publishing)" in aliases
 
 
+def test_another_entrys_name_is_never_filed_as_an_alias(client, session, world):
+    """Production files C00122 under plain "Rata Blanca": that is the OTHER
+    entry's name, and as Barilari's alias it would misfile Rata Blanca's
+    statements on the next import."""
+    world["acct"].display_name = "Rata Blanca"
+    session.commit()
+    assert move(client, world["mech"].id, world["acct"].id, world["yt"].id).status_code == 200
+    aliases = [a.alias_name for a in session.query(WriterAlias)
+               .filter(WriterAlias.writer_id == world["yt"].id)]
+    assert "Rata Blanca" not in aliases
+
+
 def test_already_distributed_statements_can_still_be_corrected(client, session, world):
     """The common case for a mis-filed account is that it already went out. The
     response says how many, so the admin is told what changed hands."""

@@ -1399,6 +1399,17 @@ async def remove_account(
     return {"removed": code}
 
 
+def _names_another_entry(db: Session, name: str, writer_id: int) -> bool:
+    """True when `name` is the name of an active roster entry other than this one."""
+    n = normalize_name(name)
+    return any(
+        normalize_name(w.canonical_name) == n
+        for w in db.query(Writer.canonical_name).filter(
+            Writer.id != writer_id, Writer.status != WriterStatus.OFFBOARDED
+        )
+    )
+
+
 @writers_admin_router.post("/{writer_id}/accounts/{account_id}/move")
 async def move_account(
     writer_id: int,
@@ -1464,8 +1475,11 @@ async def move_account(
 
     # Remember the name this account files under, so the next client-list import
     # recognises it instead of creating an orphan for it again.
+    # Never a name that is ANOTHER entry's: moving C00122 off "Rata Blanca"
+    # would otherwise file "Rata Blanca" as an alias of Barilari's entry, the
+    # kind of wrong alias that misfiled statements in the first place.
     filed_as = account.display_name
-    if filed_as and filed_as != target.canonical_name:
+    if filed_as and filed_as != target.canonical_name and not _names_another_entry(db, filed_as, target.id):
         exists = (
             db.query(WriterAlias)
             .filter(WriterAlias.writer_id == target.id, WriterAlias.alias_name == filed_as)
